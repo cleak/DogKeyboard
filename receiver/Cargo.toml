@@ -9,6 +9,7 @@ description = "DOGKBD receiver GUI for Windows/Linux"
 dogkbd-proto.workspace = true
 clap = { version = "4", features = ["derive"] }
 eframe = "0.29"
+rodio = "0.19"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
