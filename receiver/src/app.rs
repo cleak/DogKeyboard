@@ -33,7 +33,7 @@ pub struct DogkbdApp {
 
 impl DogkbdApp {
     pub fn new(rx: Receiver<KeyTap>) -> Self {
-        Self {
+        let mut app = Self {
             rx,
             armed: false,
             target_window: None,
@@ -43,7 +43,9 @@ impl DogkbdApp {
             error: None,
             packet_count: 0,
             inject_count: 0,
-        }
+        };
+        app.refresh_windows();
+        app
     }
 
     /// Refresh the list of available windows
@@ -156,6 +158,7 @@ impl eframe::App for DogkbdApp {
             // Window selection
             ui.label("Target Window:");
             egui::ComboBox::from_id_salt("target_window")
+                .width(ui.available_width() - 10.0)
                 .selected_text(
                     self.target_window
                         .as_ref()
@@ -163,22 +166,26 @@ impl eframe::App for DogkbdApp {
                         .unwrap_or_else(|| "None".to_string()),
                 )
                 .show_ui(ui, |ui| {
-                    if ui.selectable_label(self.target_window.is_none(), "None").clicked() {
-                        self.target_window = None;
-                    }
-                    for window in &self.available_windows {
-                        let selected = self
-                            .target_window
-                            .as_ref()
-                            .map(|t| t.title == window.title)
-                            .unwrap_or(false);
-                        if ui
-                            .selectable_label(selected, window.display_name())
-                            .clicked()
-                        {
-                            self.target_window = Some(window.clone());
-                        }
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height(300.0)
+                        .show(ui, |ui| {
+                            if ui.selectable_label(self.target_window.is_none(), "None").clicked() {
+                                self.target_window = None;
+                            }
+                            for window in &self.available_windows {
+                                let selected = self
+                                    .target_window
+                                    .as_ref()
+                                    .map(|t| t.title == window.title)
+                                    .unwrap_or(false);
+                                if ui
+                                    .selectable_label(selected, window.display_name())
+                                    .clicked()
+                                {
+                                    self.target_window = Some(window.clone());
+                                }
+                            }
+                        });
                 });
 
             ui.separator();

@@ -23,8 +23,9 @@ impl WindowInfo {
     pub fn display_name(&self) -> String {
         if self.title.is_empty() {
             self.process_name.clone()
-        } else if self.title.len() > 50 {
-            format!("{}... - {}", &self.title[..47], self.process_name)
+        } else if self.title.chars().count() > 50 {
+            let truncated: String = self.title.chars().take(47).collect();
+            format!("{}... - {}", truncated, self.process_name)
         } else {
             format!("{} - {}", self.title, self.process_name)
         }
