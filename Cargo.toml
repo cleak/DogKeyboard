@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["proto", "sender", "receiver"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+dogkbd-proto = { path = "proto" }

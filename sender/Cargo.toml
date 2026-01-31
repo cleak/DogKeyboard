@@ -1,0 +1,13 @@
+[package]
+name = "dogkbd-sender"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DOGKBD sender daemon for Raspberry Pi"
+
+[dependencies]
+dogkbd-proto.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.12"
