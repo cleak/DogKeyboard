@@ -3,10 +3,6 @@
 **/*.rs.bk
 Cargo.lock
 
-# Secret file (NEVER commit)
-*.secret
-dogkbd.secret
-
 # IDE
 .idea/
 .vscode/

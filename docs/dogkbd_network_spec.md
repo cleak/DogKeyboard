@@ -1,10 +1,10 @@
-# DOGKBD — Network “Puppy Keyboard” Proxy (Raspberry Pi → UDP Broadcast → Windows/Linux Key Injector)
+# DOGKBD — Network "Puppy Keyboard" Proxy (Raspberry Pi → UDP Broadcast → Windows/Linux Key Injector)
 
-> **Purpose:** Let a 9‑lb dog walk on a rubber USB keyboard connected to a **Raspberry Pi 5**, and have those “random” key presses **show up as typing** on a Windows (or Linux) machine running **Git Bash** (or any chosen window), while filtering out “danger keys” like Esc/Tab/Ctrl.
+> **Purpose:** Let a 9‑lb dog walk on a rubber USB keyboard connected to a **Raspberry Pi 5**, and have those "random" key presses **show up as typing** on a Windows (or Linux) machine running **Git Bash** (or any chosen window), while filtering out "danger keys" like Esc/Tab/Ctrl.
 
 This document is a **complete, self-contained spec**: architecture, protocol, safety model, and full Rust code listings for a Cargo workspace with:
-- `dogkbd-sender` (Pi): reads Linux `evdev` input, filters keys, and broadcasts each “key tap”
-- `dogkbd-receiver` (Windows/Linux): receives broadcasts, verifies authenticity, optionally gates to a selected target window, injects keystrokes, and shows a small GUI with **auto-refreshing window dropdown + preview**
+- `dogkbd-sender` (Pi): reads Linux `evdev` input, filters keys, and broadcasts each "key tap"
+- `dogkbd-receiver` (Windows/Linux): receives broadcasts, optionally gates to a selected target window, injects keystrokes, and shows a small GUI with **auto-refreshing window dropdown + preview**
 
 ---
 
@@ -13,14 +13,13 @@ This document is a **complete, self-contained spec**: architecture, protocol, sa
 - [1. Goals and constraints](#1-goals-and-constraints)
 - [2. Architecture overview](#2-architecture-overview)
 - [3. Transport and robustness](#3-transport-and-robustness)
-- [4. Security model](#4-security-model)
-- [5. Key model and filtering](#5-key-model-and-filtering)
-- [6. Protocol specification](#6-protocol-specification)
-- [7. Raspberry Pi 5 sender](#7-raspberry-pi-5-sender)
-- [8. Receiver app (Windows + Linux) with GUI](#8-receiver-app-windows--linux-with-gui)
-- [9. Build & run instructions](#9-build--run-instructions)
-- [10. Troubleshooting](#10-troubleshooting)
-- [11. Future upgrades](#11-future-upgrades)
+- [4. Key model and filtering](#4-key-model-and-filtering)
+- [5. Protocol specification](#5-protocol-specification)
+- [6. Raspberry Pi 5 sender](#6-raspberry-pi-5-sender)
+- [7. Receiver app (Windows + Linux) with GUI](#7-receiver-app-windows--linux-with-gui)
+- [8. Build & run instructions](#8-build--run-instructions)
+- [9. Troubleshooting](#9-troubleshooting)
+- [10. Future upgrades](#10-future-upgrades)
 - [Appendix A — HID usage codes used](#appendix-a--hid-usage-codes-used)
 - [Appendix B — Windows scan code mapping](#appendix-b--windows-scan-code-mapping)
 - [Appendix C — Linux uinput mapping notes](#appendix-c--linux-uinput-mapping-notes)
@@ -31,20 +30,20 @@ This document is a **complete, self-contained spec**: architecture, protocol, sa
 
 ### Functional goals
 1. **Capture real keypresses** from a physical rubber USB keyboard attached to Raspberry Pi 5.
-2. **Filter out “danger keys”** (Esc/Tab/Ctrl/Alt/Win/F-keys/etc.) to prevent breaking your CLI session.
+2. **Filter out "danger keys"** (Esc/Tab/Ctrl/Alt/Win/F-keys/etc.) to prevent breaking your CLI session.
 3. **Send each keypress over the LAN** using UDP broadcast (to the whole subnet).
 4. **Receive and inject** those keypresses on Windows and Linux.
 5. Provide a **small GUI** on the receiver:
    - Auto-refreshing dropdown of open windows
    - Ability to **select a target window** (e.g., **Git Bash**)
-   - “Armed” toggle (off by default)
-   - Optional “Auto-focus target” mode
-   - **Preview**: log + live “what would be typed” buffer
+   - "Armed" toggle (off by default)
+   - Optional "Auto-focus target" mode
+   - **Preview**: log + live "what would be typed" buffer
 
 ### Non-goals (by design)
-- Perfect reliability (UDP can drop). It’s *okay* if some characters drop.
-- Key-up fidelity, key repeat fidelity, or true “hold keys”. We use **stateless tap events**.
-- Sending to a background window reliably on Windows without focusing it (Windows input model doesn’t really support this safely for terminals).
+- Perfect reliability (UDP can drop). It's *okay* if some characters drop.
+- Key-up fidelity, key repeat fidelity, or true "hold keys". We use **stateless tap events**.
+- Sending to a background window reliably on Windows without focusing it (Windows input model doesn't really support this safely for terminals).
 
 ### Latency target
 - Added latency ≤ **100ms** per keypress. Typical LAN UDP + injection should be single-digit ms.
@@ -68,7 +67,6 @@ Raspberry Pi 5 (dogkbd-sender)
         ▼
 Windows/Linux PC (dogkbd-receiver)
   - UDP listener
-  - verify HMAC
   - deduplicate (seq)
   - GUI target selection
   - (optional) focus gate
@@ -94,31 +92,11 @@ Windows/Linux PC (dogkbd-receiver)
 2. **Duplicate-send**: sender can send each packet **twice** (same sequence number).
 3. **Dedup**: receiver keeps `last_seq` per `device_id`, drops duplicates.
 
-If a packet drops, you lose a character — acceptable for “dog typing”. But you don’t get stuck modifiers.
+If a packet drops, you lose a character — acceptable for "dog typing". But you don't get stuck modifiers.
 
 ---
 
-## 4. Security model
-
-Broadcast keystrokes are dangerous on a LAN unless authenticated.
-
-### We use HMAC authentication
-- Each packet includes a truncated **HMAC-SHA256** computed over the header.
-- Receiver verifies before accepting.
-- Without the secret, other devices can’t spoof keystrokes.
-
-### Generate and distribute secret
-Create a 32-byte secret (hex) and copy to both Pi and receiver PC:
-
-```bash
-openssl rand -hex 32 > dogkbd.secret
-```
-
-Store securely. Anyone with this file can inject keys.
-
----
-
-## 5. Key model and filtering
+## 4. Key model and filtering
 
 ### Sender-side allowlist (recommended)
 **Allow**:
@@ -139,9 +117,9 @@ Receiver also enforces the same allowlist. Even if the sender is misconfigured, 
 
 ---
 
-## 6. Protocol specification
+## 5. Protocol specification
 
-### Packet: 32 bytes (little-endian)
+### Packet: 16 bytes (little-endian)
 
 | Offset | Size | Field | Description |
 |---:|---:|---|---|
@@ -152,10 +130,9 @@ Receiver also enforces the same allowlist. Even if the sender is misconfigured, 
 | 10 | 4 | `seq` | monotonic u32 counter |
 | 14 | 1 | `mods` | bit0 = shift (others reserved) |
 | 15 | 1 | `hid` | USB HID Usage ID (Keyboard page 0x07) |
-| 16 | 16 | `mac` | HMAC-SHA256(secret, bytes[0..16]) truncated to 16 bytes |
 
 ### Message semantics
-- Each packet means “tap this key”: down then up.
+- Each packet means "tap this key": down then up.
 - Receiver MUST:
   - apply modifiers (currently only Shift)
   - press key
@@ -166,24 +143,24 @@ Receiver also enforces the same allowlist. Even if the sender is misconfigured, 
 - Receiver keeps last seen sequence per `device_id`.
 - Drops any packet with `seq <= last_seq` for that device.
 
-`device_id` changes every sender run so restarts don’t get “stuck” behind old sequence numbers.
+`device_id` changes every sender run so restarts don't get "stuck" behind old sequence numbers.
 
 ---
 
-## 7. Raspberry Pi 5 sender
+## 6. Raspberry Pi 5 sender
 
-### 7.1 Hardware
+### 6.1 Hardware
 - Plug rubber keyboard into **any USB-A port** on the Pi 5.
 
-No “power USB-C OTG” required in this network design.
+No "power USB-C OTG" required in this network design.
 
-### 7.2 Identify the keyboard device
+### 6.2 Identify the keyboard device
 You already saw the right one in your logs:
 - `/dev/input/event5` is `"SIGMACHIP USB Keyboard"` (main interface)
 - event6/event7 are consumer/system control — ignore
 
-### 7.3 Make a stable input symlink (recommended)
-Create `/dev/input/dogkbd` via udev so reboots/hotplug don’t change things.
+### 6.3 Make a stable input symlink (recommended)
+Create `/dev/input/dogkbd` via udev so reboots/hotplug don't change things.
 
 `/etc/udev/rules.d/99-dogkbd.rules`:
 
@@ -202,7 +179,7 @@ sudo udevadm trigger
 ls -l /dev/input/dogkbd
 ```
 
-### 7.4 Sender system behavior
+### 6.4 Sender system behavior
 - Opens `/dev/input/dogkbd` (or a path you pass)
 - Calls `grab()` to prevent local OS from consuming events
 - Filters + converts evdev keys → HID usage
@@ -210,19 +187,19 @@ ls -l /dev/input/dogkbd
 
 ---
 
-## 8. Receiver app (Windows + Linux) with GUI
+## 7. Receiver app (Windows + Linux) with GUI
 
-### 8.1 What “targeting a window” means in practice
-On Windows, **`SendInput` injects to the foreground input queue**, not to an arbitrary HWND. Terminals like Git Bash generally won’t accept synthetic keystrokes via `PostMessage(WM_CHAR)` reliably.
+### 7.1 What "targeting a window" means in practice
+On Windows, **`SendInput` injects to the foreground input queue**, not to an arbitrary HWND. Terminals like Git Bash generally won't accept synthetic keystrokes via `PostMessage(WM_CHAR)` reliably.
 
-So our “targeting” is implemented as:
+So our "targeting" is implemented as:
 
 - **Strict gate (recommended):** Only inject when the **selected window is currently foreground**.
 - **Auto-focus mode (optional):** If the selected window is not foreground, try `SetForegroundWindow(target)`. If it succeeds, inject; otherwise drop.
 
 This ensures you never type into the wrong place.
 
-### 8.2 Receiver GUI requirements
+### 7.2 Receiver GUI requirements
 - Runs on Windows and Linux (Linux feature set may be reduced).
 - Shows:
   - UDP status (last packet time, counters)
@@ -234,11 +211,11 @@ This ensures you never type into the wrong place.
     - Auto-focus (default OFF)
   - Preview:
     - rolling key log (injected/dropped + reason)
-    - “typed so far” text buffer (approximation)
+    - "typed so far" text buffer (approximation)
 
 ---
 
-## 9. Full code (Cargo workspace)
+## 8. Full code (Cargo workspace)
 
 Create a folder `dogkbd/` with this layout:
 
@@ -268,7 +245,7 @@ dogkbd/
 
 ---
 
-## 9.1 Root workspace `Cargo.toml`
+## 8.1 Root workspace `Cargo.toml`
 
 ```toml
 [workspace]
@@ -278,7 +255,7 @@ resolver = "2"
 
 ---
 
-## 9.2 `proto` crate
+## 8.2 `proto` crate
 
 ### `proto/Cargo.toml`
 ```toml
@@ -289,17 +266,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
-hmac = "0.12"
-sha2 = "0.10"
 ```
 
 ### `proto/src/lib.rs`
 ```rust
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-
-type HmacSha256 = Hmac<Sha256>;
-
 pub const MAGIC: [u8; 4] = *b"DOGK";
 pub const VERSION: u8 = 1;
 pub const MSG_KEYTAP: u8 = 1;
@@ -307,7 +277,7 @@ pub const MSG_KEYTAP: u8 = 1;
 /// Modifier bits
 pub const MOD_SHIFT: u8 = 1 << 0;
 
-/// One stateless “tap” event (press+release) for a key, plus modifier state.
+/// One stateless "tap" event (press+release) for a key, plus modifier state.
 #[derive(Debug, Clone, Copy)]
 pub struct KeyTap {
     pub device_id: u32,
@@ -316,7 +286,7 @@ pub struct KeyTap {
     pub hid: u8, // HID usage page 0x07
 }
 
-/// Encode a KeyTap into a fixed 32-byte packet.
+/// Encode a KeyTap into a fixed 16-byte packet.
 /// Layout:
 /// [0..4]  = MAGIC
 /// [4]     = VERSION
@@ -325,9 +295,8 @@ pub struct KeyTap {
 /// [10..14]= seq (LE)
 /// [14]    = mods
 /// [15]    = hid
-/// [16..32]= HMAC(secret, [0..16]) truncated to 16 bytes
-pub fn encode(secret: &[u8], kt: KeyTap) -> [u8; 32] {
-    let mut buf = [0u8; 32];
+pub fn encode(kt: KeyTap) -> [u8; 16] {
+    let mut buf = [0u8; 16];
     buf[0..4].copy_from_slice(&MAGIC);
     buf[4] = VERSION;
     buf[5] = MSG_KEYTAP;
@@ -336,32 +305,19 @@ pub fn encode(secret: &[u8], kt: KeyTap) -> [u8; 32] {
     buf[10..14].copy_from_slice(&kt.seq.to_le_bytes());
     buf[14] = kt.mods;
     buf[15] = kt.hid;
-
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC key");
-    mac.update(&buf[0..16]);
-    let full = mac.finalize().into_bytes();
-    buf[16..32].copy_from_slice(&full[..16]);
     buf
 }
 
-/// Decode and authenticate a 32-byte packet.
-/// Returns None if invalid/malformed/bad HMAC.
-pub fn decode(secret: &[u8], buf: &[u8]) -> Option<KeyTap> {
-    if buf.len() != 32 {
+/// Decode a 16-byte packet.
+/// Returns None if invalid/malformed.
+pub fn decode(buf: &[u8]) -> Option<KeyTap> {
+    if buf.len() != 16 {
         return None;
     }
     if buf[0..4] != MAGIC {
         return None;
     }
     if buf[4] != VERSION || buf[5] != MSG_KEYTAP {
-        return None;
-    }
-
-    // verify HMAC
-    let mut mac = HmacSha256::new_from_slice(secret).ok()?;
-    mac.update(&buf[0..16]);
-    let full = mac.finalize().into_bytes();
-    if buf[16..32] != full[..16] {
         return None;
     }
 
@@ -441,7 +397,7 @@ pub fn hid_to_us_ansi_char(hid: u8, shift: bool) -> Option<char> {
 
 ---
 
-## 9.3 Sender (`dogkbd-sender`)
+## 8.3 Sender (`dogkbd-sender`)
 
 ### `sender/Cargo.toml`
 ```toml
@@ -456,7 +412,6 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dogkbd-proto = { path = "../proto" }
 evdev = "0.13"
-hex = "0.4"
 if-addrs = "0.14"
 rand = "0.8"
 ```
@@ -469,7 +424,6 @@ use dogkbd_proto::{encode, KeyTap, MOD_SHIFT};
 use evdev::{Device, EventSummary, KeyCode};
 use if_addrs::get_if_addrs;
 use rand::RngCore;
-use std::fs;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::thread;
@@ -485,10 +439,6 @@ struct Args {
     /// UDP port
     #[arg(long, default_value_t = 44555)]
     port: u16,
-
-    /// Secret file (hex string, e.g. output of `openssl rand -hex 32`)
-    #[arg(long, default_value = "dogkbd.secret")]
-    secret_file: PathBuf,
 
     /// Optional explicit destination(s) (unicast or broadcast). Can be repeated.
     /// Example: --dest 192.168.1.255 --dest 192.168.1.50
@@ -510,17 +460,6 @@ struct Args {
     /// Log every sent key (spammy but helpful)
     #[arg(long, default_value_t = false)]
     verbose: bool,
-}
-
-fn read_secret_hex(path: &PathBuf) -> Result<Vec<u8>> {
-    let s = fs::read_to_string(path)
-        .with_context(|| format!("reading secret file: {}", path.display()))?;
-    let s = s.trim();
-    let bytes = hex::decode(s).map_err(|e| anyhow!("secret file must be hex: {e}"))?;
-    if bytes.len() < 16 {
-        return Err(anyhow!("secret is too short; use at least 16 bytes (32+ recommended)"));
-    }
-    Ok(bytes)
 }
 
 fn broadcast_targets(port: u16) -> Result<Vec<SocketAddrV4>> {
@@ -614,7 +553,6 @@ fn evdev_to_hid(k: KeyCode) -> Option<u8> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let secret = read_secret_hex(&args.secret_file)?;
 
     let mut device = Device::open(&args.device)
         .with_context(|| format!("opening device {}", args.device.display()))?;
@@ -661,7 +599,7 @@ fn main() -> Result<()> {
                     if let Some(hid) = evdev_to_hid(k) {
                         seq = seq.wrapping_add(1);
                         let mods = if shift_down { MOD_SHIFT } else { 0 };
-                        let pkt = encode(&secret, KeyTap { device_id, seq, mods, hid });
+                        let pkt = encode(KeyTap { device_id, seq, mods, hid });
 
                         if args.verbose {
                             eprintln!("send seq={} mods={} hid=0x{:02x}", seq, mods, hid);
@@ -685,14 +623,14 @@ fn main() -> Result<()> {
 }
 ```
 
-### 7.5 Run sender manually (Pi)
+### 6.5 Run sender manually (Pi)
 ```bash
 cd dogkbd
 cargo build -p dogkbd-sender --release
-sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd --secret-file dogkbd.secret
+sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd
 ```
 
-### 7.6 systemd service (optional, recommended)
+### 6.6 systemd service (optional, recommended)
 Create `/etc/systemd/system/dogkbd-sender.service`:
 
 ```ini
@@ -705,7 +643,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/home/pi/dogkbd
-ExecStart=/home/pi/dogkbd/target/release/dogkbd-sender --device /dev/input/dogkbd --secret-file /home/pi/dogkbd/dogkbd.secret --duplicate 2
+ExecStart=/home/pi/dogkbd/target/release/dogkbd-sender --device /dev/input/dogkbd --duplicate 2
 Restart=always
 RestartSec=1
 
@@ -722,13 +660,13 @@ sudo systemctl status dogkbd-sender.service
 
 ---
 
-## 9.4 Receiver (`dogkbd-receiver`)
+## 8.4 Receiver (`dogkbd-receiver`)
 
 This is the GUI app you run on your Windows machine (and can also run on Linux).
 
 ### Receiver behavior
 - Binds UDP `0.0.0.0:44555`
-- Decodes + verifies HMAC
+- Decodes packets
 - Dedup
 - Applies allowlist safety
 - If **Armed** and target gate passes:
@@ -750,7 +688,6 @@ crossbeam-channel = "0.5"
 dogkbd-proto = { path = "../proto" }
 eframe = "0.29"
 egui = "0.29"
-hex = "0.4"
 parking_lot = "0.12"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -781,7 +718,6 @@ mod target;
 
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name="dogkbd-receiver", about="Receive DOGKBD UDP broadcast packets and inject keystrokes")]
@@ -789,10 +725,6 @@ pub struct Args {
     /// UDP port to listen on
     #[arg(long, default_value_t = 44555)]
     pub port: u16,
-
-    /// Secret file (hex string)
-    #[arg(long, default_value = "dogkbd.secret")]
-    pub secret_file: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -854,7 +786,6 @@ use crate::app::{AppEvent, SharedSettings};
 
 pub fn spawn_listener(
     port: u16,
-    secret: Vec<u8>,
     settings: SharedSettings,
     tx: Sender<AppEvent>,
 ) -> Result<std::thread::JoinHandle<()>> {
@@ -870,11 +801,11 @@ pub fn spawn_listener(
                 Ok((n, src)) => {
                     let now = SystemTime::now();
                     let pkt = &buf[..n];
-                    let Some(kt) = decode(&secret, pkt) else {
+                    let Some(kt) = decode(pkt) else {
                         let _ = tx.send(AppEvent::PacketRejected {
                             when: now,
                             src,
-                            reason: "bad packet or HMAC".into(),
+                            reason: "bad packet".into(),
                         });
                         continue;
                     };
@@ -1230,7 +1161,7 @@ pub fn inject_windows(settings: &Settings, kt: KeyTap) -> Result<()> {
 }
 ```
 
-> **Note:** For some “extended keys” (arrows, etc.), you’d need KEYEVENTF_EXTENDEDKEY and different scan codes. We intentionally **don’t allow** those keys in the allowlist for safety.
+> **Note:** For some "extended keys" (arrows, etc.), you'd need KEYEVENTF_EXTENDEDKEY and different scan codes. We intentionally **don't allow** those keys in the allowlist for safety.
 
 ---
 
@@ -1357,7 +1288,7 @@ pub fn inject_linux(settings: &Settings, kt: KeyTap) -> Result<()> {
 }
 ```
 
-> Linux injection uses `/dev/uinput`. See [Troubleshooting](#10-troubleshooting) for permissions.
+> Linux injection uses `/dev/uinput`. See [Troubleshooting](#9-troubleshooting) for permissions.
 
 ---
 
@@ -1365,7 +1296,6 @@ pub fn inject_linux(settings: &Settings, kt: KeyTap) -> Result<()> {
 ```rust
 use crate::keys::{to_preview, KeyPreview};
 use crate::target::TargetWindow;
-use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender};
 use dogkbd_proto::KeyTap;
 use parking_lot::{Mutex, RwLock};
@@ -1374,7 +1304,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use super::net;
+use crate::net;
 
 #[derive(Clone)]
 pub struct Settings {
@@ -1423,7 +1353,7 @@ pub struct DogKbdApp {
     injected: u64,
     dropped: u64,
 
-    // Preview of “typed” buffer
+    // Preview of "typed" buffer
     preview: String,
 
     // Log
@@ -1439,21 +1369,8 @@ pub struct DogKbdApp {
     last_refresh: SystemTime,
 }
 
-fn read_secret_hex(path: &std::path::Path) -> Result<Vec<u8>> {
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("reading secret file: {}", path.display()))?;
-    let s = s.trim();
-    let bytes = hex::decode(s).context("secret file must be hex")?;
-    if bytes.len() < 16 {
-        anyhow::bail!("secret is too short; use at least 16 bytes (32+ recommended)");
-    }
-    Ok(bytes)
-}
-
 impl DogKbdApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, args: crate::Args) -> Self {
-        let secret = read_secret_hex(&args.secret_file).expect("secret file");
-
         let (tx, rx) = crossbeam_channel::unbounded();
 
         let settings = {
@@ -1470,7 +1387,7 @@ impl DogKbdApp {
             }))
         };
 
-        net::spawn_listener(args.port, secret, settings.clone(), tx.clone())
+        net::spawn_listener(args.port, settings.clone(), tx.clone())
             .expect("spawn listener");
 
         let mut app = Self {
@@ -1657,43 +1574,7 @@ impl eframe::App for DogKbdApp {
 
 ---
 
-### `receiver/src/app.rs` **(small fix: module paths)**
-In the earlier file we referenced `super::net` but `app.rs` is a top-level module. Make sure you have:
-
-```rust
-use crate::net;
-```
-
-(Already included above.)
-
----
-
-### `receiver/src/inject/linux.rs` **(Linux state lock definition)**
-The Linux injector expects `Settings` to have `linux_state: Arc<Mutex<LinuxState>>`, which is included in `Settings` under `cfg(target_os="linux")`.
-
----
-
-## 9.5 Receiver: missing modules
-Create these two tiny “glue” modules:
-
-### `receiver/src/inject/mod.rs` (already provided)
-### `receiver/src/target/mod.rs` (already provided)
-
-And add empty `receiver/src/inject/` and `receiver/src/target/` directories.
-
----
-
-## 9.6 Receiver: `receiver/src/app.rs` depends on `crate::Args`
-We used `crate::Args` from `main.rs`. Ensure `Args` is `pub` in `main.rs` (it is).
-
----
-
-## 9.7 Windows Firewall
-On first run, Windows may prompt you to allow network access. You must allow **UDP inbound** for the receiver app, or create a rule for UDP port `44555`.
-
----
-
-## 9.8 Linux permissions for uinput
+## 8.5 Linux permissions for uinput
 If you run receiver on Linux and want injection:
 - You need access to `/dev/uinput`
 - Often requires root unless you set udev rules
@@ -1715,9 +1596,9 @@ sudo usermod -aG input $USER
 
 ---
 
-## 9. Build & run instructions
+## 8. Build & run instructions
 
-### 9.1 Build on Raspberry Pi 5
+### 8.1 Build on Raspberry Pi 5
 Install Rust (one common approach):
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -1732,19 +1613,19 @@ cargo build -p dogkbd-sender --release
 
 Run:
 ```bash
-sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd --secret-file dogkbd.secret
+sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd
 ```
 
-### 9.2 Build on Windows (receiver)
+### 8.2 Build on Windows (receiver)
 1. Install Rust (rustup)
 2. In PowerShell:
 ```powershell
 cd dogkbd
 cargo build -p dogkbd-receiver --release
-.\target\release\dogkbd-receiver.exe --port 44555 --secret-file dogkbd.secret
+.\target\release\dogkbd-receiver.exe --port 44555
 ```
 
-### 9.3 Use it with Git Bash
+### 8.3 Use it with Git Bash
 1. Open Git Bash window you want to type into.
 2. Run `dogkbd-receiver.exe`
 3. In the dropdown, select the Git Bash window (likely `mintty.exe` with a title like `MINGW64:/...`)
@@ -1757,44 +1638,43 @@ If the wrong window is focused, keys will be dropped (by design).
 
 ---
 
-## 10. Troubleshooting
+## 9. Troubleshooting
 
-### “Receiver shows no packets”
-- Confirm Pi and PC are on same subnet (broadcast doesn’t route)
+### "Receiver shows no packets"
+- Confirm Pi and PC are on same subnet (broadcast doesn't route)
 - Try explicit unicast:
   - Sender: `--dest <PC_IP>`
 - Check Windows firewall inbound UDP rule
 - Verify sender targets printed include the correct broadcast (e.g. `192.168.1.255`)
 
-### “Packets accepted but no characters appear”
+### "Packets accepted but no characters appear"
 - On Windows, make sure the selected target window is truly foreground.
-- Some apps running as admin won’t accept injection from non-admin processes.
+- Some apps running as admin won't accept injection from non-admin processes.
   - Run receiver as admin **or** run Git Bash non-admin.
 
-### “Git Bash not in window list”
+### "Git Bash not in window list"
 - Make sure Git Bash window has a non-empty title
 - Some windows may hide their title or be owned by a different process; refresh should catch most.
 
-### “Linux injection fails”
-- `/dev/uinput` permission. See [Linux permissions](#98-linux-permissions-for-uinput).
+### "Linux injection fails"
+- `/dev/uinput` permission. See [Linux permissions](#85-linux-permissions-for-uinput).
 
-### “Dog typed something dangerous”
+### "Dog typed something dangerous"
 - Tighten allowlist (remove punctuation, remove backspace, etc.)
 - Keep strict gating on
 - Consider additional guardrails:
-  - only accept when receiver app window has “Armed” and also a physical hotkey toggle
+  - only accept when receiver app window has "Armed" and also a physical hotkey toggle
 
 ---
 
-## 11. Future upgrades
+## 10. Future upgrades
 
 1. **Multicast instead of broadcast** (often more Wi‑Fi friendly)
-2. Optional **encryption** (AEAD) in addition to HMAC
-3. More modifiers (Ctrl/Alt) — not recommended for safety
-4. Sender treat dispenser integration:
-   - receiver broadcasts “READY FOR INPUT” to Pi
+2. More modifiers (Ctrl/Alt) — not recommended for safety
+3. Sender treat dispenser integration:
+   - receiver broadcasts "READY FOR INPUT" to Pi
    - Pi triggers treat dispensers via API
-5. Linux X11 active-window gating
+4. Linux X11 active-window gating
 
 ---
 
@@ -1830,7 +1710,7 @@ We use Set 1 scan codes (common for `SendInput` with `KEYEVENTF_SCANCODE`) for U
 - -=0x0C, =0x0D, [=0x1A, ]=0x1B, \=0x2B, ;=0x27, '=0x28, `=0x29, ,=0x33, .=0x34, /=0x35
 - LeftShift=0x2A
 
-If you later add arrow keys, you’ll need “extended” scan codes.
+If you later add arrow keys, you'll need "extended" scan codes.
 
 ---
 
@@ -1841,6 +1721,6 @@ Linux injection uses `evdev::uinput::VirtualDevice`:
 - Emit EV_KEY events (type=1) with value 1 then 0
 - `VirtualDevice::emit()` appends `SYN_REPORT` automatically
 
-This works on X11 and Wayland because it’s kernel-level input, but it always goes to the currently focused window.
+This works on X11 and Wayland because it's kernel-level input, but it always goes to the currently focused window.
 
 ---

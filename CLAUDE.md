@@ -11,15 +11,15 @@ DOGKBD is a network keyboard proxy that captures keystrokes from a USB keyboard 
 **Cargo Workspace Structure:**
 ```
 dogkbd/
-  proto/      - Shared protocol: packet encoding/decoding, HMAC auth, HID allowlist
+  proto/      - Shared protocol: packet encoding/decoding, HID allowlist
   sender/     - Pi daemon: reads evdev, filters keys, broadcasts UDP packets
   receiver/   - Windows/Linux GUI: receives packets, targets windows, injects keystrokes
 ```
 
 **Data Flow:**
 1. Sender reads `/dev/input/dogkbd` (evdev), tracks shift state, filters via allowlist
-2. Broadcasts 32-byte HMAC-authenticated KeyTap packets over UDP (port 44555)
-3. Receiver verifies HMAC, deduplicates by sequence number, checks allowlist
+2. Broadcasts 16-byte KeyTap packets over UDP (port 44555)
+3. Receiver deduplicates by sequence number, checks allowlist
 4. If armed and target window is foreground, injects keystroke via `SendInput` (Windows) or `uinput` (Linux)
 
 **Key Design Decisions:**
@@ -38,13 +38,13 @@ cargo build -p dogkbd-sender --release
 cargo build -p dogkbd-receiver --release
 
 # Run sender (requires sudo for evdev grab)
-sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd --secret-file dogkbd.secret
+sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd
 
 # Run receiver
-./target/release/dogkbd-receiver --port 44555 --secret-file dogkbd.secret
+./target/release/dogkbd-receiver --port 44555
 ```
 
-## Protocol Spec (32-byte packet, little-endian)
+## Protocol Spec (16-byte packet, little-endian)
 
 | Offset | Size | Field |
 |--------|------|-------|
@@ -55,7 +55,6 @@ sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd --secret-file dog
 | 10 | 4 | seq |
 | 14 | 1 | mods (bit0=shift) |
 | 15 | 1 | HID usage code |
-| 16 | 16 | HMAC-SHA256 truncated |
 
 ## Key Allowlist (Safety Critical)
 
@@ -84,9 +83,3 @@ Everything else (Esc, Tab, Ctrl, Alt, Meta, F-keys) is blocked at both sender an
 **Receiver (Linux):**
 - Uses `/dev/uinput` — requires permissions (add user to `input` group)
 - No window targeting; injects to focused window
-
-## Secret File
-
-Generate with: `openssl rand -hex 32 > dogkbd.secret`
-
-Copy to both Pi and receiver machine. Anyone with this file can inject keystrokes.
