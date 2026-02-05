@@ -1641,10 +1641,14 @@ If the wrong window is focused, keys will be dropped (by design).
 ## 9. Troubleshooting
 
 ### "Receiver shows no packets"
-- Confirm Pi and PC are on same subnet (broadcast doesn't route)
-- Try explicit unicast:
+- **Windows Firewall (most common cause):** Windows blocks incoming UDP by default. Add a firewall rule to allow traffic on the receiver port:
+  ```powershell
+  # Run as Administrator
+  New-NetFirewallRule -DisplayName "DOGKBD Receiver" -Direction Inbound -Protocol UDP -LocalPort 44555 -Action Allow
+  ```
+- Confirm Pi and PC are on same subnet (broadcast doesn't cross subnets/VLANs)
+- Try explicit unicast if broadcast isn't working:
   - Sender: `--dest <PC_IP>`
-- Check Windows firewall inbound UDP rule
 - Verify sender targets printed include the correct broadcast (e.g. `192.168.1.255`)
 
 ### "Packets accepted but no characters appear"
