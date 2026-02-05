@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOGKBD Overlay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  #terminal {
+    font-family: 'Courier New', Consolas, 'Lucida Console', monospace;
+    font-size: 28px;
+    color: #33ff33;
+    padding: 20px;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    text-shadow: 0 0 8px rgba(51, 255, 51, 0.6);
+    position: relative;
+  }
+
+  /* CRT scanline overlay */
+  #terminal::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.08) 2px,
+      rgba(0, 0, 0, 0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 10;
+  }
+
+  .line {
+    white-space: pre-wrap;
+    word-break: break-all;
+    min-height: 1.2em;
+    line-height: 1.2;
+  }
+
+  /* Blinking block cursor */
+  #cursor {
+    display: inline-block;
+    width: 0.6em;
+    height: 1.1em;
+    background: #33ff33;
+    vertical-align: text-bottom;
+    animation: blink 1s step-end infinite;
+    box-shadow: 0 0 6px rgba(51, 255, 51, 0.5);
+  }
+
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+
+  #status {
+    position: fixed;
+    top: 8px;
+    right: 12px;
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    z-index: 20;
+  }
+
+  .connected { color: #33ff33; }
+  .disconnected { color: #ff3333; }
+</style>
+</head>
+<body>
+<div id="terminal">
+  <div id="lines"></div>
+</div>
+<div id="status" class="disconnected">DISCONNECTED</div>
+
+<script>
+(function() {
+  const MAX_LINES = 20;
+  const linesContainer = document.getElementById('lines');
+  const statusEl = document.getElementById('status');
+
+  // Text model: array of line strings
+  let lines = [''];
+
+  function render() {
+    // Keep only last MAX_LINES
+    while (lines.length > MAX_LINES) {
+      lines.shift();
+    }
+
+    linesContainer.innerHTML = '';
+    for (let i = 0; i < lines.length; i++) {
+      const div = document.createElement('div');
+      div.className = 'line';
+      div.textContent = lines[i];
+      if (i === lines.length - 1) {
+        const cursor = document.createElement('span');
+        cursor.id = 'cursor';
+        div.appendChild(cursor);
+      }
+      linesContainer.appendChild(div);
+    }
+  }
+
+  function handleMessage(data) {
+    const msg = JSON.parse(data);
+    switch (msg.type) {
+      case 'char':
+        lines[lines.length - 1] += msg.char;
+        break;
+      case 'space':
+        lines[lines.length - 1] += ' ';
+        break;
+      case 'enter':
+        lines.push('');
+        break;
+      case 'backspace':
+        if (lines[lines.length - 1].length > 0) {
+          lines[lines.length - 1] = lines[lines.length - 1].slice(0, -1);
+        } else if (lines.length > 1) {
+          lines.pop();
+        }
+        break;
+    }
+    render();
+  }
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+    ws.onopen = function() {
+      statusEl.textContent = 'CONNECTED';
+      statusEl.className = 'connected';
+    };
+
+    ws.onmessage = function(e) {
+      handleMessage(e.data);
+    };
+
+    ws.onclose = function() {
+      statusEl.textContent = 'DISCONNECTED';
+      statusEl.className = 'disconnected';
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>
