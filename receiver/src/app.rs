@@ -6,6 +6,7 @@ use dogkbd_proto::KeyTap;
 use eframe::egui;
 use rodio::{OutputStream, Sink, Source};
 use std::sync::mpsc::Receiver;
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Maximum number of key previews to show
@@ -76,6 +77,12 @@ pub struct DogkbdApp {
     last_periodic_enter: Instant,
     /// Flag to prevent double-enter in same frame
     enter_injected_this_frame: bool,
+
+    // Input delay
+    /// Delay in milliseconds before processing received keystrokes
+    input_delay_ms: u64,
+    /// Buffer of delayed key taps: (ready_at, tap)
+    delay_buffer: VecDeque<(Instant, KeyTap)>,
 }
 
 impl DogkbdApp {
@@ -125,6 +132,10 @@ impl DogkbdApp {
             prev_periodic_enter_interval: 60,
             last_periodic_enter: Instant::now(),
             enter_injected_this_frame: false,
+
+            // Input delay (0ms by default)
+            input_delay_ms: 0,
+            delay_buffer: VecDeque::new(),
         };
         app.refresh_windows();
         app
@@ -201,74 +212,90 @@ impl DogkbdApp {
         matches!(preview, KeyPreview::Char(_) | KeyPreview::Space)
     }
 
-    /// Process pending key taps
+    /// Process pending key taps (with configurable delay)
     fn process_keys(&mut self) {
+        // Stage 1: Drain channel into delay buffer
+        let delay = Duration::from_millis(self.input_delay_ms);
+        let now = Instant::now();
         while let Ok(tap) = self.rx.try_recv() {
             self.packet_count += 1;
+            self.delay_buffer.push_back((now + delay, tap));
+        }
 
-            // Track input timing
-            self.last_input_time = Some(Instant::now());
+        // Stage 2: Process taps whose delay has elapsed
+        while let Some(&(ready_at, _)) = self.delay_buffer.front() {
+            if Instant::now() < ready_at {
+                break;
+            }
+            let (_, tap) = self.delay_buffer.pop_front().unwrap();
+            self.process_single_tap(&tap);
+        }
+    }
 
-            // Add to preview
-            if let Some(preview) = KeyPreview::from_tap(&tap) {
-                // Track for auto-enter on idle feature
-                if matches!(preview, KeyPreview::Enter) {
-                    self.has_input_since_enter = false;
-                    // Also reset validation tone sequence on Enter
-                    self.text_char_count = 0;
+    /// Process a single key tap (preview, validation tone, injection)
+    fn process_single_tap(&mut self, tap: &KeyTap) {
+        // Track input timing
+        self.last_input_time = Some(Instant::now());
+
+        // Add to preview
+        if let Some(preview) = KeyPreview::from_tap(tap) {
+            // Track for auto-enter on idle feature
+            if matches!(preview, KeyPreview::Enter) {
+                self.has_input_since_enter = false;
+                // Also reset validation tone sequence on Enter
+                self.text_char_count = 0;
+                self.validation_tone_played = false;
+            } else {
+                self.has_input_since_enter = true;
+            }
+
+            // Track text characters for validation tone
+            // Backspace decrements count (but not below 0)
+            if matches!(preview, KeyPreview::Backspace) {
+                self.text_char_count = self.text_char_count.saturating_sub(1);
+                // If count dropped below threshold, allow tone to play again
+                if self.text_char_count < VALIDATION_CHAR_THRESHOLD {
                     self.validation_tone_played = false;
-                } else {
-                    self.has_input_since_enter = true;
                 }
+            } else if Self::is_text_char(&preview) {
+                self.text_char_count += 1;
 
-                // Track text characters for validation tone
-                // Backspace decrements count (but not below 0)
-                if matches!(preview, KeyPreview::Backspace) {
-                    self.text_char_count = self.text_char_count.saturating_sub(1);
-                    // If count dropped below threshold, allow tone to play again
-                    if self.text_char_count < VALIDATION_CHAR_THRESHOLD {
-                        self.validation_tone_played = false;
-                    }
-                } else if Self::is_text_char(&preview) {
-                    self.text_char_count += 1;
-
-                    // Play validation tone if threshold reached and not yet played
-                    if self.validation_tone_enabled
-                        && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
-                        && !self.validation_tone_played
-                    {
-                        self.play_validation_tone();
-                        self.validation_tone_played = true;
-                    }
-                }
-
-                self.key_preview.push(preview);
-                if self.key_preview.len() > MAX_PREVIEW_KEYS {
-                    self.key_preview.remove(0);
+                // Play validation tone if threshold reached and not yet played
+                if self.validation_tone_enabled
+                    && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
+                    && !self.validation_tone_played
+                {
+                    self.play_validation_tone();
+                    self.validation_tone_played = true;
                 }
             }
 
-            // Inject if armed and target window is foreground
-            if self.armed {
-                if let Some(ref target) = self.target_window {
-                    #[cfg(windows)]
-                    let is_fg = crate::target::is_foreground(target.hwnd);
-                    #[cfg(not(windows))]
-                    let is_fg = true; // Linux injects to focused window
+            self.key_preview.push(preview);
+            if self.key_preview.len() > MAX_PREVIEW_KEYS {
+                self.key_preview.remove(0);
+            }
+        }
 
-                    if is_fg {
-                        match crate::inject::inject(&tap) {
-                            Ok(()) => {
-                                self.inject_count += 1;
-                                self.error = None;
-                            }
-                            Err(e) => {
-                                self.error = Some(e);
-                            }
+        // Inject if armed and target window is foreground
+        if self.armed {
+            if let Some(ref target) = self.target_window {
+                #[cfg(windows)]
+                let is_fg = crate::target::is_foreground(target.hwnd);
+                #[cfg(not(windows))]
+                let is_fg = true; // Linux injects to focused window
+
+                if is_fg {
+                    match crate::inject::inject(tap) {
+                        Ok(()) => {
+                            self.inject_count += 1;
+                            self.error = None;
                         }
-                    } else {
-                        self.status = "Target not foreground".to_string();
+                        Err(e) => {
+                            self.error = Some(e);
+                        }
                     }
+                } else {
+                    self.status = "Target not foreground".to_string();
                 }
             }
         }
@@ -415,6 +442,26 @@ impl eframe::App for DogkbdApp {
             egui::CollapsingHeader::new("Auto Features")
                 .default_open(true)
                 .show(ui, |ui| {
+                    // Input delay
+                    ui.horizontal(|ui| {
+                        ui.label("Input delay:");
+                        ui.add(
+                            egui::Slider::new(&mut self.input_delay_ms, 0..=5000)
+                                .suffix(" ms")
+                        );
+                    });
+                    if self.input_delay_ms > 0 && !self.delay_buffer.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                format!("{} key(s) buffered", self.delay_buffer.len()),
+                            );
+                        });
+                    }
+
+                    ui.add_space(4.0);
+
                     // Feature 1: Auto-enter on idle
                     ui.checkbox(&mut self.auto_enter_on_idle, "Auto-enter on idle (30s)")
                         .on_hover_text("Inject Enter after 30 seconds of no input (only if there was input since last Enter)");
