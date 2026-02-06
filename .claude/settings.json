@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -c \"(New-Object Media.SoundPlayer 'C:\\Users\\caleb\\.claude\\sounds\\chime.wav').PlaySync()\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -c \"(New-Object Media.SoundPlayer 'C:\\Users\\caleb\\.claude\\sounds\\chime.wav').PlaySync()\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
