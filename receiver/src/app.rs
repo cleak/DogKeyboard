@@ -4,7 +4,7 @@ use crate::keys::KeyPreview;
 use crate::target::WindowInfo;
 use dogkbd_proto::KeyTap;
 use eframe::egui;
-use rodio::{OutputStream, Sink, Source};
+use rodio::{Decoder, OutputStream, Sink};
 use std::sync::mpsc::Receiver;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -153,14 +153,14 @@ impl DogkbdApp {
         }
     }
 
-    /// Play the validation tone
+    /// Play the validation chime
     fn play_validation_tone(&self) {
+        static CHIME_BYTES: &[u8] = include_bytes!("../chime.mp3");
         if let Some(ref sink) = self.audio_sink {
-            // Generate a pleasant beep tone (800Hz for 150ms)
-            let source = rodio::source::SineWave::new(800.0)
-                .take_duration(Duration::from_millis(150))
-                .amplify(0.3);
-            sink.append(source);
+            let cursor = std::io::Cursor::new(CHIME_BYTES);
+            if let Ok(source) = Decoder::new(cursor) {
+                sink.append(source);
+            }
         }
     }
 

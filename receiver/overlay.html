@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOGKBD Overlay</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: transparent;
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+  }
+
+  #keys {
+    font-family: 'Courier New', Consolas, 'Lucida Console', monospace;
+    font-size: 48px;
+    position: absolute;
+    top: 66%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .key {
+    display: inline-block;
+    color: #fff;
+    text-shadow:
+      0 0 6px rgba(255, 255, 255, 0.7),
+      0 1px 3px rgba(0, 0, 0, 0.5);
+    animation: pop-in 0.15s ease-out, fade-out 0.4s ease-in 2.6s forwards;
+    white-space: pre;
+  }
+
+  @keyframes pop-in {
+    0% { transform: scale(1.6); opacity: 0.3; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+
+  @keyframes fade-out {
+    0% { opacity: 1; }
+    100% { opacity: 0; }
+  }
+
+  #status {
+    position: fixed;
+    top: 8px;
+    right: 12px;
+    font-family: 'Courier New', Consolas, monospace;
+    font-size: 12px;
+    z-index: 20;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  }
+
+  .connected { color: rgba(255, 255, 255, 0.5); }
+  .disconnected { color: #ff3333; }
+</style>
+</head>
+<body>
+<div id="keys"></div>
+<div id="status" class="disconnected">DISCONNECTED</div>
+
+<script>
+(function() {
+  const KEY_LIFETIME = 3000; // ms before removal (must match fade-out delay + duration)
+  const keysContainer = document.getElementById('keys');
+  const statusEl = document.getElementById('status');
+
+  function addKey(text) {
+    const span = document.createElement('span');
+    span.className = 'key';
+    span.textContent = text;
+    keysContainer.appendChild(span);
+
+    setTimeout(function() {
+      span.remove();
+    }, KEY_LIFETIME);
+  }
+
+  function handleMessage(data) {
+    const msg = JSON.parse(data);
+    switch (msg.type) {
+      case 'char':
+        addKey(msg.char);
+        break;
+      case 'space':
+        addKey('\u2423'); // open box symbol for space
+        break;
+      case 'enter':
+        addKey('\u23CE'); // return symbol
+        break;
+      case 'backspace':
+        addKey('\u232B'); // backspace symbol
+        break;
+    }
+  }
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(proto + '//' + location.host + '/ws');
+
+    ws.onopen = function() {
+      statusEl.textContent = 'CONNECTED';
+      statusEl.className = 'connected';
+    };
+
+    ws.onmessage = function(e) {
+      handleMessage(e.data);
+    };
+
+    ws.onclose = function() {
+      statusEl.textContent = 'DISCONNECTED';
+      statusEl.className = 'disconnected';
+      setTimeout(connect, 2000);
+    };
+
+    ws.onerror = function() {
+      ws.close();
+    };
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

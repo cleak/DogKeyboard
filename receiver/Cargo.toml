@@ -10,6 +10,10 @@ dogkbd-proto.workspace = true
 clap = { version = "4", features = ["derive"] }
 eframe = "0.29"
 rodio = "0.19"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+axum = { version = "0.8", features = ["ws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

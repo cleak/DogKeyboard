@@ -14,6 +14,7 @@ dogkbd/
   proto/      - Shared protocol: packet encoding/decoding, HID allowlist
   sender/     - Pi daemon: reads evdev, filters keys, broadcasts UDP packets
   receiver/   - Windows/Linux GUI: receives packets, targets windows, injects keystrokes
+                Also serves OBS overlay (HTTP + WebSocket) on --web-port (default 8080)
 ```
 
 **Data Flow:**
@@ -21,6 +22,7 @@ dogkbd/
 2. Broadcasts 16-byte KeyTap packets over UDP (port 44555)
 3. Receiver deduplicates by sequence number, checks allowlist
 4. If armed and target window is foreground, injects keystroke via `SendInput` (Windows) or `uinput` (Linux)
+5. Simultaneously broadcasts keystrokes via WebSocket to OBS overlay clients
 
 **Key Design Decisions:**
 - Stateless "tap" events (press+release) — no stuck keys possible
@@ -40,8 +42,8 @@ cargo build -p dogkbd-receiver --release
 # Run sender (requires sudo for evdev grab)
 sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd
 
-# Run receiver
-./target/release/dogkbd-receiver --port 44555
+# Run receiver (also starts OBS overlay web server on port 8080)
+./target/release/dogkbd-receiver --port 44555 --web-port 8080
 ```
 
 ## Protocol Spec (16-byte packet, little-endian)

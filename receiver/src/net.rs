@@ -1,15 +1,23 @@
 //! UDP network listener
 
+use crate::overlay::{self, KeystrokeMsg};
 use dogkbd_proto::{hid_allowed, KeyTap, PACKET_SIZE};
 use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::sync::mpsc::Sender;
+use tokio::sync::broadcast;
 
 /// Deduplication window size (number of sequence numbers to track per device)
 const DEDUP_WINDOW: u32 = 100;
 
-/// Start the UDP listener thread
-pub fn start_listener(port: u16, tx: Sender<KeyTap>) -> std::io::Result<std::thread::JoinHandle<()>> {
+/// Start the UDP listener thread.
+///
+/// Sends decoded taps to both the GUI (mpsc) and overlay WebSocket clients (broadcast).
+pub fn start_listener(
+    port: u16,
+    tx: Sender<KeyTap>,
+    overlay_tx: broadcast::Sender<KeystrokeMsg>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_nonblocking(false)?;
 
@@ -49,7 +57,12 @@ pub fn start_listener(port: u16, tx: Sender<KeyTap>) -> std::io::Result<std::thr
                     }
                     seen.insert(tap.device_id, tap.seq);
 
-                    // Send to main thread
+                    // Send to overlay WebSocket clients
+                    if let Some(msg) = overlay::tap_to_msg(&tap) {
+                        let _ = overlay_tx.send(msg);
+                    }
+
+                    // Send to GUI
                     if tx.send(tap).is_err() {
                         // Channel closed, exit thread
                         break;

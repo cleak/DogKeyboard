@@ -6,10 +6,12 @@ mod app;
 mod inject;
 mod keys;
 mod net;
+mod overlay;
 mod target;
 
 use clap::Parser;
 use std::sync::mpsc;
+use tokio::sync::broadcast;
 
 /// DOGKBD receiver GUI for Windows/Linux
 #[derive(Parser, Debug)]
@@ -19,17 +21,34 @@ struct Args {
     /// UDP port to listen on
     #[arg(short, long, default_value_t = 44555)]
     port: u16,
+
+    /// HTTP port for OBS overlay web server
+    #[arg(long, default_value_t = 8080)]
+    web_port: u16,
 }
 
 fn main() -> eframe::Result<()> {
     let args = Args::parse();
 
-    // Create channel for network -> GUI communication
+    // Create channels
     let (tx, rx) = mpsc::channel();
+    let (overlay_tx, _overlay_rx) = broadcast::channel::<overlay::KeystrokeMsg>(256);
+
+    // Start OBS overlay web server in a background thread with its own tokio runtime
+    let web_port = args.web_port;
+    let overlay_tx_clone = overlay_tx.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(async {
+            if let Err(e) = overlay::run_web_server(web_port, overlay_tx_clone).await {
+                eprintln!("Web server error: {}", e);
+            }
+        });
+    });
 
     // Start network listener thread
     let port = args.port;
-    match net::start_listener(port, tx) {
+    match net::start_listener(port, tx, overlay_tx) {
         Ok(_handle) => {
             println!("Listening on UDP port {}", port);
         }
@@ -47,9 +66,12 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let _result = eframe::run_native(
         "DOGKBD Receiver",
         options,
         Box::new(|_cc| Ok(Box::new(app::DogkbdApp::new(rx)))),
-    )
+    );
+
+    // Force-exit so the background tokio runtime / web server thread doesn't keep the process alive
+    std::process::exit(0);
 }
