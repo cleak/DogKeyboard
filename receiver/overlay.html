@@ -16,7 +16,7 @@
 
   #keys {
     font-family: 'Courier New', Consolas, 'Lucida Console', monospace;
-    font-size: 48px;
+    font-size: 62px;
     position: absolute;
     top: 66%;
     left: 50%;
@@ -25,7 +25,7 @@
     flex-wrap: wrap;
     justify-content: center;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
   }
 
   .key {
@@ -34,7 +34,7 @@
     text-shadow:
       0 0 6px rgba(255, 255, 255, 0.7),
       0 1px 3px rgba(0, 0, 0, 0.5);
-    animation: pop-in 0.15s ease-out, fade-out 0.4s ease-in 2.6s forwards;
+    animation: pop-in 0.15s ease-out, fade-out 0.4s ease-in 5.6s forwards;
     white-space: pre;
   }
 
@@ -68,7 +68,7 @@
 
 <script>
 (function() {
-  const KEY_LIFETIME = 3000; // ms before removal (must match fade-out delay + duration)
+  const KEY_LIFETIME = 6000; // ms before removal (must match fade-out delay + duration)
   const keysContainer = document.getElementById('keys');
   const statusEl = document.getElementById('status');
 
