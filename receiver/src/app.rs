@@ -5,8 +5,10 @@ use crate::target::WindowInfo;
 use dogkbd_proto::KeyTap;
 use eframe::egui;
 use rodio::{Decoder, OutputStream, Sink};
-use std::sync::mpsc::Receiver;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Maximum number of key previews to show
@@ -83,10 +85,16 @@ pub struct DogkbdApp {
     input_delay_ms: u64,
     /// Buffer of delayed key taps: (ready_at, tap)
     delay_buffer: VecDeque<(Instant, KeyTap)>,
+
+    // Claude Code busy state
+    /// Whether Claude Code is currently processing (set via HTTP endpoint)
+    claude_busy: Arc<AtomicBool>,
+    /// When Claude Code entered busy state (for watchdog)
+    claude_busy_since: Option<Instant>,
 }
 
 impl DogkbdApp {
-    pub fn new(rx: Receiver<KeyTap>) -> Self {
+    pub fn new(rx: Receiver<KeyTap>, claude_busy: Arc<AtomicBool>) -> Self {
         // Initialize audio output
         let (audio_stream, audio_sink, audio_available) = match OutputStream::try_default() {
             Ok((stream, handle)) => match Sink::try_new(&handle) {
@@ -136,6 +144,10 @@ impl DogkbdApp {
             // Input delay (0ms by default)
             input_delay_ms: 0,
             delay_buffer: VecDeque::new(),
+
+            // Claude Code busy state (idle by default)
+            claude_busy,
+            claude_busy_since: None,
         };
         app.refresh_windows();
         app
@@ -316,6 +328,11 @@ impl DogkbdApp {
 
     /// Check and handle idle timeout (auto-enter and sequence reset)
     fn check_idle_timeout(&mut self) {
+        // Don't auto-enter while Claude Code is processing
+        if self.claude_busy.load(Ordering::Relaxed) {
+            return;
+        }
+
         if let Some(last_input) = self.last_input_time {
             let idle_duration = last_input.elapsed();
 
@@ -345,11 +362,19 @@ impl DogkbdApp {
 
     /// Check and handle periodic auto-enter
     fn check_periodic_enter(&mut self) {
+        // Don't periodic-enter while Claude Code is processing
+        if self.claude_busy.load(Ordering::Relaxed) {
+            return;
+        }
+
         if self.periodic_enter_enabled {
             let elapsed = self.last_periodic_enter.elapsed();
             if elapsed >= Duration::from_secs(self.periodic_enter_interval) {
-                if self.inject_enter() {
-                    self.status = "Periodic auto-enter injected".to_string();
+                // Only inject if there's actual input to submit
+                if self.has_input_since_enter {
+                    if self.inject_enter() {
+                        self.status = "Periodic auto-enter injected".to_string();
+                    }
                 }
                 self.last_periodic_enter = Instant::now();
             }
@@ -361,6 +386,25 @@ impl eframe::App for DogkbdApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Reset per-frame flags
         self.enter_injected_this_frame = false;
+
+        // Claude Code busy watchdog: force idle after 10 minutes
+        let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
+        if claude_busy_now {
+            let since = *self.claude_busy_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_secs(600) {
+                eprintln!("Claude busy watchdog: forcing idle after 10 minutes");
+                self.claude_busy.store(false, Ordering::Relaxed);
+                self.claude_busy_since = None;
+                self.last_periodic_enter = Instant::now();
+            }
+        } else {
+            // On busy → idle transition, reset periodic timer to prevent
+            // accumulated time from firing immediately
+            if self.claude_busy_since.is_some() {
+                self.last_periodic_enter = Instant::now();
+            }
+            self.claude_busy_since = None;
+        }
 
         // Process any pending keys
         self.process_keys();
@@ -381,6 +425,12 @@ impl eframe::App for DogkbdApp {
                 ui.label(format!("Packets: {}", self.packet_count));
                 ui.separator();
                 ui.label(format!("Injected: {}", self.inject_count));
+                ui.separator();
+                if self.claude_busy.load(Ordering::Relaxed) {
+                    ui.colored_label(egui::Color32::YELLOW, "Claude: busy");
+                } else {
+                    ui.colored_label(egui::Color32::GREEN, "Claude: idle");
+                }
                 ui.separator();
                 ui.label(&self.status);
             });

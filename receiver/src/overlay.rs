@@ -2,11 +2,13 @@
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use dogkbd_proto::{hid_to_us_ansi_char, KeyTap};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -44,9 +46,15 @@ pub fn tap_to_msg(tap: &KeyTap) -> Option<KeystrokeMsg> {
     }
 }
 
+#[derive(Deserialize)]
+struct ClaudeStatusRequest {
+    status: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     tx: Arc<broadcast::Sender<KeystrokeMsg>>,
+    claude_busy: Arc<AtomicBool>,
 }
 
 async fn serve_overlay() -> impl IntoResponse {
@@ -79,18 +87,39 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
     }
 }
 
+async fn claude_status_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<ClaudeStatusRequest>,
+) -> StatusCode {
+    match payload.status.as_str() {
+        "busy" => {
+            state.claude_busy.store(true, Ordering::Relaxed);
+            println!("Claude Code: busy");
+        }
+        "idle" => {
+            state.claude_busy.store(false, Ordering::Relaxed);
+            println!("Claude Code: idle");
+        }
+        _ => return StatusCode::BAD_REQUEST,
+    }
+    StatusCode::OK
+}
+
 /// Run the HTTP/WebSocket server.
 pub async fn run_web_server(
     web_port: u16,
     tx: broadcast::Sender<KeystrokeMsg>,
+    claude_busy: Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let state = AppState {
         tx: Arc::new(tx),
+        claude_busy,
     };
 
     let app = Router::new()
         .route("/", get(serve_overlay))
         .route("/ws", get(ws_handler))
+        .route("/claude-status", post(claude_status_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{web_port}")).await?;
