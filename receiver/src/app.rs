@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 /// Maximum number of key previews to show
 const MAX_PREVIEW_KEYS: usize = 50;
 
-/// Idle timeout for auto-enter and sequence reset (30 seconds)
-const IDLE_TIMEOUT_SECS: u64 = 30;
+/// Idle timeout for auto-enter and sequence reset (6 seconds)
+const IDLE_TIMEOUT_SECS: u64 = 6;
 
-/// Number of text characters required to trigger validation tone
-const VALIDATION_CHAR_THRESHOLD: usize = 8;
+/// Minimum text characters required to submit (auto-enter) and dispense treat
+const VALIDATION_CHAR_THRESHOLD: usize = 10;
 
 /// Application state
 pub struct DogkbdApp {
@@ -153,7 +153,7 @@ impl DogkbdApp {
         }
     }
 
-    /// Play the validation chime
+    /// Play the chime sound (indicates ready for more input)
     fn play_validation_tone(&self) {
         static CHIME_BYTES: &[u8] = include_bytes!("../chime.mp3");
         if let Some(ref sink) = self.audio_sink {
@@ -162,6 +162,23 @@ impl DogkbdApp {
                 sink.append(source);
             }
         }
+    }
+
+    /// Dispense a dog treat via SSH command
+    fn dispense_treat() {
+        std::thread::spawn(|| {
+            match std::process::Command::new("ssh")
+                .args(["caleb@zoltan", "/usr/local/bin/treat1"])
+                .spawn()
+            {
+                Ok(mut child) => {
+                    let _ = child.wait();
+                }
+                Err(e) => {
+                    eprintln!("Failed to dispense treat: {}", e);
+                }
+            }
+        });
     }
 
     /// Inject an Enter key (auto-generated, not from keyboard)
@@ -232,40 +249,36 @@ impl DogkbdApp {
         }
     }
 
-    /// Process a single key tap (preview, validation tone, injection)
+    /// Process a single key tap (preview, treat dispense, injection)
     fn process_single_tap(&mut self, tap: &KeyTap) {
+        // Filter out Enter key entirely (filtered in net.rs too, this is a safety belt)
+        if tap.hid_code == 0x28 {
+            return;
+        }
+
         // Track input timing
         self.last_input_time = Some(Instant::now());
 
         // Add to preview
         if let Some(preview) = KeyPreview::from_tap(tap) {
-            // Track for auto-enter on idle feature
-            if matches!(preview, KeyPreview::Enter) {
-                self.has_input_since_enter = false;
-                // Also reset validation tone sequence on Enter
-                self.text_char_count = 0;
-                self.validation_tone_played = false;
-            } else {
-                self.has_input_since_enter = true;
-            }
+            self.has_input_since_enter = true;
 
-            // Track text characters for validation tone
+            // Track text characters for treat threshold
             // Backspace decrements count (but not below 0)
             if matches!(preview, KeyPreview::Backspace) {
                 self.text_char_count = self.text_char_count.saturating_sub(1);
-                // If count dropped below threshold, allow tone to play again
+                // If count dropped below threshold, allow treat to dispense again
                 if self.text_char_count < VALIDATION_CHAR_THRESHOLD {
                     self.validation_tone_played = false;
                 }
             } else if Self::is_text_char(&preview) {
                 self.text_char_count += 1;
 
-                // Play validation tone if threshold reached and not yet played
-                if self.validation_tone_enabled
-                    && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
+                // Dispense treat when threshold reached (not yet dispensed this sequence)
+                if self.text_char_count >= VALIDATION_CHAR_THRESHOLD
                     && !self.validation_tone_played
                 {
-                    self.play_validation_tone();
+                    Self::dispense_treat();
                     self.validation_tone_played = true;
                 }
             }
@@ -307,18 +320,21 @@ impl DogkbdApp {
             let idle_duration = last_input.elapsed();
 
             if idle_duration >= Duration::from_secs(IDLE_TIMEOUT_SECS) {
-                // Reset validation tone sequence
-                if self.text_char_count > 0 || self.validation_tone_played {
+                // Auto-enter on idle if enabled, has input, and minimum chars met
+                if self.auto_enter_on_idle
+                    && self.has_input_since_enter
+                    && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
+                {
+                    if self.inject_enter() {
+                        self.status = "Auto-enter injected (idle timeout)".to_string();
+                        // Play chime to indicate ready for more input
+                        if self.validation_tone_enabled {
+                            self.play_validation_tone();
+                        }
+                    }
+                    // Reset sequence counters after submission
                     self.text_char_count = 0;
                     self.validation_tone_played = false;
-                }
-
-                // Auto-enter on idle if enabled and we have input since last enter
-                if self.auto_enter_on_idle && self.has_input_since_enter {
-                    if self.inject_enter() {
-                        // inject_enter already resets has_input_since_enter
-                        self.status = "Auto-enter injected (idle timeout)".to_string();
-                    }
                 }
 
                 // Clear last_input_time to prevent repeated triggers
@@ -463,15 +479,15 @@ impl eframe::App for DogkbdApp {
                     ui.add_space(4.0);
 
                     // Feature 1: Auto-enter on idle
-                    ui.checkbox(&mut self.auto_enter_on_idle, "Auto-enter on idle (30s)")
-                        .on_hover_text("Inject Enter after 30 seconds of no input (only if there was input since last Enter)");
+                    ui.checkbox(&mut self.auto_enter_on_idle, "Auto-enter on idle (6s)")
+                        .on_hover_text("Inject Enter after 6 seconds of no input (requires 10+ text characters)");
 
                     ui.add_space(4.0);
 
-                    // Feature 2: Validation tone
+                    // Feature 2: Chime on submit
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut self.validation_tone_enabled, "Validation tone")
-                            .on_hover_text("Play a tone after 8 text characters are received to confirm input acceptance");
+                        ui.checkbox(&mut self.validation_tone_enabled, "Chime on submit")
+                            .on_hover_text("Play a chime after auto-enter to indicate ready for more input");
                         if !self.audio_available {
                             ui.colored_label(egui::Color32::YELLOW, "(audio unavailable)");
                         } else if ui.small_button("Test").clicked() {
@@ -486,15 +502,13 @@ impl eframe::App for DogkbdApp {
                     }
                     self.prev_validation_tone_enabled = self.validation_tone_enabled;
 
-                    if self.validation_tone_enabled {
-                        ui.horizontal(|ui| {
-                            ui.add_space(20.0);
-                            ui.label(format!("Chars: {}/{}", self.text_char_count, VALIDATION_CHAR_THRESHOLD));
-                            if self.validation_tone_played {
-                                ui.colored_label(egui::Color32::GREEN, "✓ Tone played");
-                            }
-                        });
-                    }
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.label(format!("Chars: {}/{}", self.text_char_count, VALIDATION_CHAR_THRESHOLD));
+                        if self.validation_tone_played {
+                            ui.colored_label(egui::Color32::GREEN, "✓ Treat dispensed");
+                        }
+                    });
 
                     ui.add_space(4.0);
 
@@ -609,14 +623,14 @@ mod tests {
 
     #[test]
     fn test_validation_char_threshold() {
-        // Threshold should be 8
-        assert_eq!(VALIDATION_CHAR_THRESHOLD, 8);
+        // Threshold should be 10
+        assert_eq!(VALIDATION_CHAR_THRESHOLD, 10);
     }
 
     #[test]
     fn test_idle_timeout_secs() {
-        // Idle timeout should be 30 seconds
-        assert_eq!(IDLE_TIMEOUT_SECS, 30);
+        // Idle timeout should be 6 seconds
+        assert_eq!(IDLE_TIMEOUT_SECS, 6);
     }
 
     #[test]

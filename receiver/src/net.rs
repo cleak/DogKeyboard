@@ -57,6 +57,11 @@ pub fn start_listener(
                     }
                     seen.insert(tap.device_id, tap.seq);
 
+                    // Filter out Enter key from remote keyboard entirely
+                    if tap.hid_code == 0x28 {
+                        continue;
+                    }
+
                     // Send to overlay WebSocket clients
                     if let Some(msg) = overlay::tap_to_msg(&tap) {
                         let _ = overlay_tx.send(msg);
