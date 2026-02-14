@@ -17,8 +17,11 @@ const MAX_PREVIEW_KEYS: usize = 50;
 /// Idle timeout for auto-enter and sequence reset (6 seconds)
 const IDLE_TIMEOUT_SECS: u64 = 6;
 
-/// Minimum text characters required to submit (auto-enter) and dispense treat
+/// Minimum total text characters required to submit (auto-enter) and dispense treat
 const VALIDATION_CHAR_THRESHOLD: usize = 10;
+
+/// Minimum text characters typed while Claude is idle
+const IDLE_CHAR_THRESHOLD: usize = 4;
 
 /// Application state
 pub struct DogkbdApp {
@@ -54,10 +57,14 @@ pub struct DogkbdApp {
     validation_tone_enabled: bool,
     /// Previous state of validation_tone_enabled (for toggle detection)
     prev_validation_tone_enabled: bool,
-    /// Count of text characters in current input sequence
+    /// Count of text characters in current input sequence (total)
     text_char_count: usize,
+    /// Count of text characters typed while Claude is idle
+    idle_char_count: usize,
     /// Whether the validation tone has been played for this sequence
     validation_tone_played: bool,
+    /// Whether a chime is pending (deferred until busy→idle transition)
+    chime_pending: bool,
     /// Audio output stream (must be kept alive for audio playback to work)
     #[allow(dead_code)]
     audio_stream: Option<OutputStream>,
@@ -89,8 +96,8 @@ pub struct DogkbdApp {
     // Claude Code busy state
     /// Whether Claude Code is currently processing (set via HTTP endpoint)
     claude_busy: Arc<AtomicBool>,
-    /// When Claude Code entered busy state (for watchdog)
-    claude_busy_since: Option<Instant>,
+    /// Whether Claude was busy last frame (for transition detection)
+    claude_was_busy: bool,
 }
 
 impl DogkbdApp {
@@ -128,7 +135,9 @@ impl DogkbdApp {
             validation_tone_enabled: true,
             prev_validation_tone_enabled: true,
             text_char_count: 0,
+            idle_char_count: 0,
             validation_tone_played: false,
+            chime_pending: false,
             audio_stream,
             audio_sink,
             audio_available,
@@ -147,7 +156,7 @@ impl DogkbdApp {
 
             // Claude Code busy state (idle by default)
             claude_busy,
-            claude_busy_since: None,
+            claude_was_busy: false,
         };
         app.refresh_windows();
         app
@@ -276,19 +285,32 @@ impl DogkbdApp {
             self.has_input_since_enter = true;
 
             // Track text characters for treat threshold
+            let claude_idle = !self.claude_busy.load(Ordering::Relaxed);
             // Backspace decrements count (but not below 0)
             if matches!(preview, KeyPreview::Backspace) {
                 self.text_char_count = self.text_char_count.saturating_sub(1);
+                if claude_idle {
+                    self.idle_char_count = self.idle_char_count.saturating_sub(1);
+                }
                 // If count dropped below threshold, allow treat to dispense again
-                if self.text_char_count < VALIDATION_CHAR_THRESHOLD {
+                if self.text_char_count < VALIDATION_CHAR_THRESHOLD
+                    || self.idle_char_count < IDLE_CHAR_THRESHOLD
+                {
                     self.validation_tone_played = false;
                 }
             } else if Self::is_text_char(&preview) {
                 self.text_char_count += 1;
+                if claude_idle {
+                    self.idle_char_count += 1;
+                }
 
-                // Dispense treat when threshold reached (not yet dispensed this sequence)
+                // Dispense treat when both thresholds reached (not yet dispensed this sequence)
+                // Only dispense when armed AND Claude is idle
                 if self.text_char_count >= VALIDATION_CHAR_THRESHOLD
+                    && self.idle_char_count >= IDLE_CHAR_THRESHOLD
                     && !self.validation_tone_played
+                    && self.armed
+                    && claude_idle
                 {
                     Self::dispense_treat();
                     self.validation_tone_played = true;
@@ -341,16 +363,18 @@ impl DogkbdApp {
                 if self.auto_enter_on_idle
                     && self.has_input_since_enter
                     && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
+                    && self.idle_char_count >= IDLE_CHAR_THRESHOLD
                 {
                     if self.inject_enter() {
                         self.status = "Auto-enter injected (idle timeout)".to_string();
-                        // Play chime to indicate ready for more input
+                        // Defer chime to busy→idle transition
                         if self.validation_tone_enabled {
-                            self.play_validation_tone();
+                            self.chime_pending = true;
                         }
                     }
                     // Reset sequence counters after submission
                     self.text_char_count = 0;
+                    self.idle_char_count = 0;
                     self.validation_tone_played = false;
                 }
 
@@ -387,24 +411,18 @@ impl eframe::App for DogkbdApp {
         // Reset per-frame flags
         self.enter_injected_this_frame = false;
 
-        // Claude Code busy watchdog: force idle after 10 minutes
+        // Detect busy → idle transition
         let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
-        if claude_busy_now {
-            let since = *self.claude_busy_since.get_or_insert_with(Instant::now);
-            if since.elapsed() > Duration::from_secs(600) {
-                eprintln!("Claude busy watchdog: forcing idle after 10 minutes");
-                self.claude_busy.store(false, Ordering::Relaxed);
-                self.claude_busy_since = None;
-                self.last_periodic_enter = Instant::now();
+        if !claude_busy_now && self.claude_was_busy {
+            // Reset periodic timer to prevent accumulated time from firing immediately
+            self.last_periodic_enter = Instant::now();
+            // Play deferred chime now that Claude is done
+            if self.chime_pending {
+                self.play_validation_tone();
+                self.chime_pending = false;
             }
-        } else {
-            // On busy → idle transition, reset periodic timer to prevent
-            // accumulated time from firing immediately
-            if self.claude_busy_since.is_some() {
-                self.last_periodic_enter = Instant::now();
-            }
-            self.claude_busy_since = None;
         }
+        self.claude_was_busy = claude_busy_now;
 
         // Process any pending keys
         self.process_keys();
@@ -548,13 +566,22 @@ impl eframe::App for DogkbdApp {
                     // Detect toggle: reset state when re-enabled
                     if self.validation_tone_enabled && !self.prev_validation_tone_enabled {
                         self.text_char_count = 0;
+                        self.idle_char_count = 0;
                         self.validation_tone_played = false;
+                        self.chime_pending = false;
                     }
                     self.prev_validation_tone_enabled = self.validation_tone_enabled;
 
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
-                        ui.label(format!("Chars: {}/{}", self.text_char_count, VALIDATION_CHAR_THRESHOLD));
+                        ui.label(format!(
+                            "Chars: {}/{} (idle: {}/{})",
+                            self.text_char_count, VALIDATION_CHAR_THRESHOLD,
+                            self.idle_char_count, IDLE_CHAR_THRESHOLD,
+                        ));
+                        if self.chime_pending {
+                            ui.colored_label(egui::Color32::YELLOW, "chime pending");
+                        }
                         if self.validation_tone_played {
                             ui.colored_label(egui::Color32::GREEN, "✓ Treat dispensed");
                         }
