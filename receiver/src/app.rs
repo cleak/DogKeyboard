@@ -272,6 +272,11 @@ impl DogkbdApp {
 
     /// Process a single key tap (preview, treat dispense, injection)
     fn process_single_tap(&mut self, tap: &KeyTap) {
+        // Ignore all input when not armed — no counting, no preview, no injection
+        if !self.armed {
+            return;
+        }
+
         // Filter out Enter key entirely (filtered in net.rs too, this is a safety belt)
         if tap.hid_code == 0x28 {
             return;
