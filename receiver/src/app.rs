@@ -17,8 +17,8 @@ const MAX_PREVIEW_KEYS: usize = 50;
 /// Idle timeout for auto-enter and sequence reset (6 seconds)
 const IDLE_TIMEOUT_SECS: u64 = 6;
 
-/// Minimum seconds between treat dispensings
-const TREAT_COOLDOWN_SECS: u64 = 180;
+/// Seconds to wait after thresholds are met before dispensing treat
+const TREAT_DELAY_SECS: u64 = 2;
 
 /// Minimum total text characters required to submit (auto-enter) and dispense treat
 const VALIDATION_CHAR_THRESHOLD: usize = 10;
@@ -68,8 +68,8 @@ pub struct DogkbdApp {
     validation_tone_played: bool,
     /// Whether a chime is pending (deferred until busy→idle transition)
     chime_pending: bool,
-    /// Time of last treat dispensing (for cooldown)
-    last_treat_time: Option<Instant>,
+    /// Scheduled treat dispense time (set when thresholds met, fires after delay)
+    treat_dispense_at: Option<Instant>,
     /// Audio output stream (must be kept alive for audio playback to work)
     #[allow(dead_code)]
     audio_stream: Option<OutputStream>,
@@ -143,7 +143,7 @@ impl DogkbdApp {
             idle_char_count: 0,
             validation_tone_played: false,
             chime_pending: false,
-            last_treat_time: None,
+            treat_dispense_at: None,
             audio_stream,
             audio_sink,
             audio_available,
@@ -309,21 +309,16 @@ impl DogkbdApp {
                     self.idle_char_count += 1;
                 }
 
-                // Dispense treat when both thresholds reached (not yet dispensed this sequence)
-                // Only dispense when armed AND Claude is idle AND cooldown elapsed
-                let cooldown_ok = self.last_treat_time.map_or(true, |t| {
-                    t.elapsed() >= Duration::from_secs(TREAT_COOLDOWN_SECS)
-                });
+                // Schedule treat when both thresholds reached (not yet dispensed this sequence)
                 if self.text_char_count >= VALIDATION_CHAR_THRESHOLD
                     && self.idle_char_count >= IDLE_CHAR_THRESHOLD
                     && !self.validation_tone_played
+                    && self.treat_dispense_at.is_none()
                     && self.armed
                     && claude_idle
-                    && cooldown_ok
                 {
-                    Self::dispense_treat();
-                    self.validation_tone_played = true;
-                    self.last_treat_time = Some(Instant::now());
+                    self.treat_dispense_at =
+                        Some(Instant::now() + Duration::from_secs(TREAT_DELAY_SECS));
                 }
             }
 
@@ -449,6 +444,15 @@ impl eframe::App for DogkbdApp {
         // Process any pending keys
         self.process_keys();
 
+        // Check if scheduled treat dispense is ready
+        if let Some(at) = self.treat_dispense_at {
+            if Instant::now() >= at {
+                Self::dispense_treat();
+                self.validation_tone_played = true;
+                self.treat_dispense_at = None;
+            }
+        }
+
         // Check timer-based features
         self.check_idle_timeout();
         self.check_periodic_enter();
@@ -518,7 +522,7 @@ impl eframe::App for DogkbdApp {
                     self.has_input_since_enter = false;
                     self.last_input_time = None;
                     self.last_periodic_enter = Instant::now();
-                    self.last_treat_time = None;
+                    self.treat_dispense_at = None;
                     self.key_preview.clear();
                     self.status = "State reset".to_string();
                 }
@@ -621,18 +625,10 @@ impl eframe::App for DogkbdApp {
                         if self.chime_pending {
                             ui.colored_label(egui::Color32::YELLOW, "chime pending");
                         }
-                        if self.validation_tone_played {
+                        if self.treat_dispense_at.is_some() {
+                            ui.colored_label(egui::Color32::YELLOW, "treat pending…");
+                        } else if self.validation_tone_played {
                             ui.colored_label(egui::Color32::GREEN, "✓ Treat dispensed");
-                        }
-                        if let Some(last_treat) = self.last_treat_time {
-                            let elapsed = last_treat.elapsed().as_secs();
-                            if elapsed < TREAT_COOLDOWN_SECS {
-                                let remaining = TREAT_COOLDOWN_SECS - elapsed;
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    format!("cooldown: {}s", remaining),
-                                );
-                            }
                         }
                     });
 
