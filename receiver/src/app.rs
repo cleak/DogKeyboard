@@ -458,6 +458,12 @@ impl eframe::App for DogkbdApp {
                 self.play_validation_tone();
                 self.chime_pending = false;
             }
+            // Bring target window to foreground so dog's next keystrokes land there
+            #[cfg(windows)]
+            if let Some(ref target) = self.target_window {
+                println!("[state] Focusing target window: {}", target.display_name());
+                crate::target::set_foreground(target.hwnd);
+            }
         } else if claude_busy_now && !self.claude_was_busy {
             // idle → busy transition
             println!("[state] Claude: idle → busy (resetting idle_char_count from {})", self.idle_char_count);

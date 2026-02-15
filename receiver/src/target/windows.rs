@@ -8,7 +8,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible,
+    GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
 };
 use windows::core::PWSTR;
 
@@ -90,4 +90,11 @@ fn get_process_name(pid: u32) -> Option<String> {
 /// Check if a specific window is currently the foreground window
 pub fn is_foreground(hwnd: HWND) -> bool {
     unsafe { GetForegroundWindow() == hwnd }
+}
+
+/// Bring a window to the foreground
+pub fn set_foreground(hwnd: HWND) {
+    unsafe {
+        let _ = SetForegroundWindow(hwnd);
+    }
 }

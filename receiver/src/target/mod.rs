@@ -4,7 +4,7 @@
 pub mod windows;
 
 #[cfg(windows)]
-pub use self::windows::{enumerate_windows, is_foreground, HWND};
+pub use self::windows::{enumerate_windows, is_foreground, set_foreground, HWND};
 
 /// Information about a window
 #[derive(Debug, Clone)]
