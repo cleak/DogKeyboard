@@ -73,9 +73,6 @@ pub fn start_listener(
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
                 Err(e) => {
                     eprintln!("Socket error: {}", e);
                     break;

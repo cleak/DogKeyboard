@@ -398,7 +398,15 @@ impl DogkbdApp {
                 if self.has_input_since_enter {
                     if self.inject_enter() {
                         self.status = "Periodic auto-enter injected".to_string();
+                        // Defer chime to busy→idle transition
+                        if self.validation_tone_enabled {
+                            self.chime_pending = true;
+                        }
                     }
+                    // Reset sequence counters after submission
+                    self.text_char_count = 0;
+                    self.idle_char_count = 0;
+                    self.validation_tone_played = false;
                 }
                 self.last_periodic_enter = Instant::now();
             }
@@ -411,9 +419,10 @@ impl eframe::App for DogkbdApp {
         // Reset per-frame flags
         self.enter_injected_this_frame = false;
 
-        // Detect busy → idle transition
+        // Detect state transitions
         let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
         if !claude_busy_now && self.claude_was_busy {
+            // busy → idle transition
             // Reset periodic timer to prevent accumulated time from firing immediately
             self.last_periodic_enter = Instant::now();
             // Play deferred chime now that Claude is done
@@ -421,6 +430,9 @@ impl eframe::App for DogkbdApp {
                 self.play_validation_tone();
                 self.chime_pending = false;
             }
+        } else if claude_busy_now && !self.claude_was_busy {
+            // idle → busy transition: only chars typed during current idle period count
+            self.idle_char_count = 0;
         }
         self.claude_was_busy = claude_busy_now;
 
@@ -482,6 +494,22 @@ impl eframe::App for DogkbdApp {
 
                 if ui.button("Refresh Windows").clicked() {
                     self.refresh_windows();
+                }
+
+                if self.audio_available && ui.button("Chime").clicked() {
+                    self.play_validation_tone();
+                }
+
+                if ui.button("Reset").clicked() {
+                    self.text_char_count = 0;
+                    self.idle_char_count = 0;
+                    self.validation_tone_played = false;
+                    self.chime_pending = false;
+                    self.has_input_since_enter = false;
+                    self.last_input_time = None;
+                    self.last_periodic_enter = Instant::now();
+                    self.key_preview.clear();
+                    self.status = "State reset".to_string();
                 }
             });
 

@@ -111,18 +111,6 @@ mod linux_main {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args = Args::parse();
 
-        // Open the evdev device
-        let mut device = Device::open(&args.device)?;
-        println!(
-            "Opened device: {} ({})",
-            device.name().unwrap_or("Unknown"),
-            args.device.display()
-        );
-
-        // Grab the device to prevent local echo
-        device.grab()?;
-        println!("Grabbed device (local echo disabled)");
-
         // Set up UDP socket for broadcast
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.set_broadcast(true)?;
@@ -134,54 +122,96 @@ mod linux_main {
         println!("Device ID: {:#x}", device_id);
 
         let mut seq: u32 = 0;
-        let mut shift_held = false;
 
-        println!("Listening for keystrokes...");
-
+        // Reconnect loop: re-open device on disconnect
         loop {
-            for event in device.fetch_events()? {
-                if let InputEventKind::Key(key) = event.kind() {
-                    let value = event.value();
-
-                    // Track shift state
-                    if matches!(key, Key::KEY_LEFTSHIFT | Key::KEY_RIGHTSHIFT) {
-                        shift_held = value != 0;
-                        continue;
-                    }
-
-                    // Only process key press (value=1), ignore release (0) and repeat (2)
-                    if value != 1 {
-                        continue;
-                    }
-
-                    // Convert to HID code
-                    let Some(hid_code) = evdev_to_hid(key) else {
-                        eprintln!("Unmapped key: {:?}", key);
-                        continue;
-                    };
-
-                    // Check allowlist (safety belt)
-                    if !hid_allowed(hid_code) {
-                        eprintln!("Blocked key: {:?} (HID {:#x})", key, hid_code);
-                        continue;
-                    }
-
-                    // Build and send packet
-                    let mods = if shift_held { MOD_SHIFT } else { 0 };
-                    let tap = KeyTap::new(device_id, seq, mods, hid_code);
-                    let packet = tap.encode();
-
-                    // Send duplicate times for UDP reliability
-                    for _ in 0..args.duplicate {
-                        socket.send_to(&packet, &dest)?;
-                    }
-
-                    seq = seq.wrapping_add(1);
-                    println!(
-                        "Sent: {:?} (HID {:#x}, shift={}, seq={})",
-                        key, hid_code, shift_held, seq
-                    );
+            // Open the evdev device
+            let mut device = match Device::open(&args.device) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("Failed to open device: {} — retrying in 2s", e);
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    continue;
                 }
+            };
+            println!(
+                "Opened device: {} ({})",
+                device.name().unwrap_or("Unknown"),
+                args.device.display()
+            );
+
+            // Grab the device to prevent local echo
+            if let Err(e) = device.grab() {
+                eprintln!("Failed to grab device: {} — retrying in 2s", e);
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+            println!("Grabbed device (local echo disabled)");
+
+            let mut shift_held = false;
+            println!("Listening for keystrokes...");
+
+            // Event loop: runs until device error (e.g., unplug)
+            let disconnected = loop {
+                match device.fetch_events() {
+                    Ok(events) => {
+                        for event in events {
+                            if let InputEventKind::Key(key) = event.kind() {
+                                let value = event.value();
+
+                                // Track shift state
+                                if matches!(key, Key::KEY_LEFTSHIFT | Key::KEY_RIGHTSHIFT) {
+                                    shift_held = value != 0;
+                                    continue;
+                                }
+
+                                // Only process key press (value=1), ignore release (0) and repeat (2)
+                                if value != 1 {
+                                    continue;
+                                }
+
+                                // Convert to HID code
+                                let Some(hid_code) = evdev_to_hid(key) else {
+                                    eprintln!("Unmapped key: {:?}", key);
+                                    continue;
+                                };
+
+                                // Check allowlist (safety belt)
+                                if !hid_allowed(hid_code) {
+                                    eprintln!("Blocked key: {:?} (HID {:#x})", key, hid_code);
+                                    continue;
+                                }
+
+                                // Build and send packet
+                                let mods = if shift_held { MOD_SHIFT } else { 0 };
+                                let tap = KeyTap::new(device_id, seq, mods, hid_code);
+                                let packet = tap.encode();
+
+                                // Send duplicate times for UDP reliability
+                                for _ in 0..args.duplicate {
+                                    if let Err(e) = socket.send_to(&packet, &dest) {
+                                        eprintln!("Send error: {}", e);
+                                    }
+                                }
+
+                                seq = seq.wrapping_add(1);
+                                println!(
+                                    "Sent: {:?} (HID {:#x}, shift={}, seq={})",
+                                    key, hid_code, shift_held, seq
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Device error: {} — will reconnect", e);
+                        break true;
+                    }
+                }
+            };
+
+            if disconnected {
+                eprintln!("Waiting 2s before reconnect...");
+                std::thread::sleep(std::time::Duration::from_secs(2));
             }
         }
     }
