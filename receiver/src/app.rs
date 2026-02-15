@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 const MAX_PREVIEW_KEYS: usize = 50;
 
 /// Idle timeout for auto-enter and sequence reset (6 seconds)
-const IDLE_TIMEOUT_SECS: u64 = 6;
+const IDLE_TIMEOUT_SECS: u64 = 5;
 
 /// Seconds to wait after thresholds are met before dispensing treat
 const TREAT_DELAY_SECS: u64 = 2;
@@ -132,7 +132,7 @@ impl DogkbdApp {
             inject_count: 0,
 
             // Feature 1: Auto-enter on idle (disabled by default)
-            auto_enter_on_idle: false,
+            auto_enter_on_idle: true,
             has_input_since_enter: false,
             last_input_time: None,
 
@@ -590,8 +590,8 @@ impl eframe::App for DogkbdApp {
                     ui.add_space(4.0);
 
                     // Feature 1: Auto-enter on idle
-                    ui.checkbox(&mut self.auto_enter_on_idle, "Auto-enter on idle (6s)")
-                        .on_hover_text("Inject Enter after 6 seconds of no input (requires 10+ text characters)");
+                    ui.checkbox(&mut self.auto_enter_on_idle, "Auto-enter on idle (5s)")
+                        .on_hover_text("Inject Enter after 5 seconds of no input (requires 10+ text characters)");
 
                     ui.add_space(4.0);
 
@@ -751,8 +751,8 @@ mod tests {
 
     #[test]
     fn test_idle_timeout_secs() {
-        // Idle timeout should be 6 seconds
-        assert_eq!(IDLE_TIMEOUT_SECS, 6);
+        // Idle timeout should be 5 seconds
+        assert_eq!(IDLE_TIMEOUT_SECS, 5);
     }
 
     #[test]
