@@ -103,6 +103,9 @@ pub struct DogkbdApp {
     claude_busy: Arc<AtomicBool>,
     /// Whether Claude was busy last frame (for transition detection)
     claude_was_busy: bool,
+    /// Whether a treat has been dispensed during the current Claude idle period.
+    /// Only resets on a busy→idle transition — prevents double-dispensing.
+    treat_dispensed_this_idle: bool,
 }
 
 impl DogkbdApp {
@@ -163,6 +166,7 @@ impl DogkbdApp {
             // Claude Code busy state (idle by default)
             claude_busy,
             claude_was_busy: false,
+            treat_dispensed_this_idle: false,
         };
         app.refresh_windows();
         app
@@ -309,14 +313,20 @@ impl DogkbdApp {
                     self.idle_char_count += 1;
                 }
 
-                // Schedule treat when both thresholds reached (not yet dispensed this sequence)
+                // Schedule treat when both thresholds reached (not yet dispensed this idle period)
                 if self.text_char_count >= VALIDATION_CHAR_THRESHOLD
                     && self.idle_char_count >= IDLE_CHAR_THRESHOLD
                     && !self.validation_tone_played
+                    && !self.treat_dispensed_this_idle
                     && self.treat_dispense_at.is_none()
                     && self.armed
                     && claude_idle
                 {
+                    println!(
+                        "[treat] Scheduling treat in {}s (chars: {}/{}, idle_chars: {}/{}, dispensed_this_idle: {})",
+                        TREAT_DELAY_SECS, self.text_char_count, VALIDATION_CHAR_THRESHOLD,
+                        self.idle_char_count, IDLE_CHAR_THRESHOLD, self.treat_dispensed_this_idle
+                    );
                     self.treat_dispense_at =
                         Some(Instant::now() + Duration::from_secs(TREAT_DELAY_SECS));
                 }
@@ -370,9 +380,12 @@ impl DogkbdApp {
                     && self.text_char_count >= VALIDATION_CHAR_THRESHOLD
                     && self.idle_char_count >= IDLE_CHAR_THRESHOLD
                 {
+                    println!(
+                        "[idle] Auto-enter firing (chars: {}, idle_chars: {}, treat_dispensed_this_idle: {})",
+                        self.text_char_count, self.idle_char_count, self.treat_dispensed_this_idle
+                    );
                     if self.inject_enter() {
                         self.status = "Auto-enter injected (idle timeout)".to_string();
-                        // Defer chime to busy→idle transition
                         if self.validation_tone_enabled {
                             self.chime_pending = true;
                         }
@@ -381,6 +394,12 @@ impl DogkbdApp {
                     self.text_char_count = 0;
                     self.idle_char_count = 0;
                     self.validation_tone_played = false;
+                } else if self.has_input_since_enter {
+                    println!(
+                        "[idle] Keyboard idle {}s but thresholds not met (chars: {}/{}, idle_chars: {}/{}, auto_enter: {})",
+                        idle_duration.as_secs(), self.text_char_count, VALIDATION_CHAR_THRESHOLD,
+                        self.idle_char_count, IDLE_CHAR_THRESHOLD, self.auto_enter_on_idle
+                    );
                 }
 
                 // Clear last_input_time to prevent repeated triggers
@@ -401,9 +420,12 @@ impl DogkbdApp {
             if elapsed >= Duration::from_secs(self.periodic_enter_interval) {
                 // Only inject if there's actual input to submit
                 if self.has_input_since_enter {
+                    println!(
+                        "[periodic] Periodic auto-enter firing (chars: {}, idle_chars: {}, treat_dispensed_this_idle: {})",
+                        self.text_char_count, self.idle_char_count, self.treat_dispensed_this_idle
+                    );
                     if self.inject_enter() {
                         self.status = "Periodic auto-enter injected".to_string();
-                        // Defer chime to busy→idle transition
                         if self.validation_tone_enabled {
                             self.chime_pending = true;
                         }
@@ -428,15 +450,17 @@ impl eframe::App for DogkbdApp {
         let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
         if !claude_busy_now && self.claude_was_busy {
             // busy → idle transition
-            // Reset periodic timer to prevent accumulated time from firing immediately
+            println!("[state] Claude: busy → idle (treat_dispensed_this_idle was {}, resetting to false)", self.treat_dispensed_this_idle);
             self.last_periodic_enter = Instant::now();
-            // Play deferred chime now that Claude is done
+            self.treat_dispensed_this_idle = false;
             if self.chime_pending {
+                println!("[state] Playing deferred chime");
                 self.play_validation_tone();
                 self.chime_pending = false;
             }
         } else if claude_busy_now && !self.claude_was_busy {
-            // idle → busy transition: only chars typed during current idle period count
+            // idle → busy transition
+            println!("[state] Claude: idle → busy (resetting idle_char_count from {})", self.idle_char_count);
             self.idle_char_count = 0;
         }
         self.claude_was_busy = claude_busy_now;
@@ -447,8 +471,10 @@ impl eframe::App for DogkbdApp {
         // Check if scheduled treat dispense is ready
         if let Some(at) = self.treat_dispense_at {
             if Instant::now() >= at {
+                println!("[treat] Dispensing treat now! (treat_dispensed_this_idle: {} → true)", self.treat_dispensed_this_idle);
                 Self::dispense_treat();
                 self.validation_tone_played = true;
+                self.treat_dispensed_this_idle = true;
                 self.treat_dispense_at = None;
             }
         }
@@ -515,9 +541,11 @@ impl eframe::App for DogkbdApp {
                 }
 
                 if ui.button("Reset").clicked() {
+                    println!("[reset] Manual state reset");
                     self.text_char_count = 0;
                     self.idle_char_count = 0;
                     self.validation_tone_played = false;
+                    self.treat_dispensed_this_idle = false;
                     self.chime_pending = false;
                     self.has_input_since_enter = false;
                     self.last_input_time = None;
