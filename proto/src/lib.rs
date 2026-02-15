@@ -109,18 +109,16 @@ impl std::error::Error for DecodeError {}
 /// - 0x04-0x1d: A-Z
 /// - 0x1e-0x27: 1-0
 /// - 0x28: Enter
-/// - 0x2a: Backspace
 /// - 0x2c: Space
-/// - 0x2d-0x38: Punctuation (- = [ ] \ ; ' ` , . /)
+/// - 0x2d-0x37: Punctuation (- = [ ] \ ; ' ` , .)
 pub fn hid_allowed(code: u8) -> bool {
     matches!(
         code,
         0x04..=0x1d  // A-Z
         | 0x1e..=0x27  // 1-0
         | 0x28  // Enter
-        | 0x2a  // Backspace
         | 0x2c  // Space
-        | 0x2d..=0x38  // Punctuation
+        | 0x2d..=0x37  // Punctuation (no slash)
     )
 }
 
@@ -246,7 +244,7 @@ mod tests {
     #[test]
     fn test_hid_allowed_special() {
         assert!(hid_allowed(0x28), "Enter should be allowed");
-        assert!(hid_allowed(0x2a), "Backspace should be allowed");
+        assert!(!hid_allowed(0x2a), "Backspace should be blocked");
         assert!(hid_allowed(0x2c), "Space should be allowed");
     }
 
@@ -254,6 +252,7 @@ mod tests {
     fn test_hid_blocked_danger_keys() {
         assert!(!hid_allowed(0x29), "Escape should be blocked");
         assert!(!hid_allowed(0x2b), "Tab should be blocked");
+        assert!(!hid_allowed(0x38), "Slash should be blocked");
         assert!(!hid_allowed(0x39), "CapsLock should be blocked");
         assert!(!hid_allowed(0xe0), "Left Ctrl should be blocked");
         assert!(!hid_allowed(0xe1), "Left Shift should be blocked");
@@ -303,7 +302,6 @@ mod tests {
         assert_eq!(hid_to_us_ansi_char(0x35, false), Some('`'));
         assert_eq!(hid_to_us_ansi_char(0x36, false), Some(','));
         assert_eq!(hid_to_us_ansi_char(0x37, false), Some('.'));
-        assert_eq!(hid_to_us_ansi_char(0x38, false), Some('/'));
 
         // Shifted
         assert_eq!(hid_to_us_ansi_char(0x2d, true), Some('_'));
@@ -316,7 +314,6 @@ mod tests {
         assert_eq!(hid_to_us_ansi_char(0x35, true), Some('~'));
         assert_eq!(hid_to_us_ansi_char(0x36, true), Some('<'));
         assert_eq!(hid_to_us_ansi_char(0x37, true), Some('>'));
-        assert_eq!(hid_to_us_ansi_char(0x38, true), Some('?'));
     }
 
     #[test]
