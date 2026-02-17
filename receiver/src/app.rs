@@ -165,11 +165,11 @@ impl DogkbdApp {
             audio_sink,
             audio_available,
 
-            // Feature 3: Periodic auto-enter (disabled by default)
-            periodic_enter_enabled: false,
-            prev_periodic_enter_enabled: false,
-            periodic_enter_interval: 60,
-            prev_periodic_enter_interval: 60,
+            // Feature 3: Periodic auto-enter (enabled by default, 15s)
+            periodic_enter_enabled: true,
+            prev_periodic_enter_enabled: true,
+            periodic_enter_interval: 15,
+            prev_periodic_enter_interval: 15,
             last_periodic_enter: Instant::now(),
             enter_injected_this_frame: false,
 
