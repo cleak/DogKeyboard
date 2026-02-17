@@ -20,8 +20,14 @@ const IDLE_TIMEOUT_SECS: u64 = 5;
 /// Seconds to wait after thresholds are met before dispensing treat
 const TREAT_DELAY_SECS: u64 = 2;
 
+/// Seconds to wait in busy state before backspacing out buffered text
+const BUSY_BACKSPACE_TIMEOUT_SECS: u64 = 20;
+
+/// Grace period before confirming a busy→idle transition (debounce thrashing)
+const IDLE_TRANSITION_DELAY_SECS: u64 = 2;
+
 /// Minimum total text characters required to submit (auto-enter) and dispense treat
-const VALIDATION_CHAR_THRESHOLD: usize = 10;
+const VALIDATION_CHAR_THRESHOLD: usize = 16;
 
 /// Minimum text characters typed while Claude is idle
 const IDLE_CHAR_THRESHOLD: usize = 4;
@@ -106,6 +112,14 @@ pub struct DogkbdApp {
     /// Whether a treat has been dispensed during the current Claude idle period.
     /// Only resets on a busy→idle transition — prevents double-dispensing.
     treat_dispensed_this_idle: bool,
+
+    // Busy-state text cleanup
+    /// Scheduled time to backspace out buffered text during busy state
+    busy_backspace_at: Option<Instant>,
+
+    // Idle transition debounce
+    /// Pending busy→idle transition time (grace period to absorb thrashing)
+    idle_transition_at: Option<Instant>,
 }
 
 impl DogkbdApp {
@@ -167,6 +181,12 @@ impl DogkbdApp {
             claude_busy,
             claude_was_busy: false,
             treat_dispensed_this_idle: false,
+
+            // Busy-state text cleanup
+            busy_backspace_at: None,
+
+            // Idle transition debounce
+            idle_transition_at: None,
         };
         app.refresh_windows();
         app
@@ -182,6 +202,11 @@ impl DogkbdApp {
         {
             self.available_windows.clear();
         }
+    }
+
+    /// Whether Claude is effectively busy (raw busy OR in idle-transition grace period)
+    fn is_effectively_busy(&self) -> bool {
+        self.claude_busy.load(Ordering::Relaxed) || self.idle_transition_at.is_some()
     }
 
     /// Play the chime sound (indicates ready for more input)
@@ -255,6 +280,72 @@ impl DogkbdApp {
         false
     }
 
+    /// Inject N backspace keys to clear buffered text from target window
+    fn inject_backspaces(&mut self, count: usize) -> usize {
+        if !self.armed || count == 0 {
+            return 0;
+        }
+        if let Some(ref target) = self.target_window {
+            #[cfg(windows)]
+            let is_fg = crate::target::is_foreground(target.hwnd);
+            #[cfg(not(windows))]
+            let is_fg = true;
+
+            if is_fg {
+                let mut injected = 0;
+                for _ in 0..count {
+                    let bs_tap = KeyTap::new(0, 0, 0, 0x2a);
+                    match crate::inject::inject(&bs_tap) {
+                        Ok(()) => {
+                            self.inject_count += 1;
+                            injected += 1;
+                        }
+                        Err(e) => {
+                            self.error = Some(e);
+                            break;
+                        }
+                    }
+                }
+                return injected;
+            }
+        }
+        0
+    }
+
+    /// Check if buffered text should be backspaced out during busy state
+    fn check_busy_backspace(&mut self) {
+        if !self.is_effectively_busy() {
+            return;
+        }
+        if let Some(at) = self.busy_backspace_at {
+            if Instant::now() >= at {
+                let count = self.text_char_count;
+                if count > 0 {
+                    println!(
+                        "[busy-backspace] Backspacing {} chars after {}s busy timeout",
+                        count, BUSY_BACKSPACE_TIMEOUT_SECS
+                    );
+                    let injected = self.inject_backspaces(count);
+                    for _ in 0..injected {
+                        self.key_preview.push(KeyPreview::Backspace);
+                        if self.key_preview.len() > MAX_PREVIEW_KEYS {
+                            self.key_preview.remove(0);
+                        }
+                    }
+                    self.status = format!("Backspaced {} chars (busy timeout)", injected);
+                }
+                // Reset text tracking
+                self.text_char_count = 0;
+                self.idle_char_count = 0;
+                self.has_input_since_enter = false;
+                self.validation_tone_played = false;
+                self.treat_dispense_at = None;
+                self.busy_backspace_at = None;
+                println!("[busy-backspace] Done, reset text tracking");
+            }
+        }
+    }
+
     /// Check if a key preview is a text character (for validation tone counting)
     fn is_text_char(preview: &KeyPreview) -> bool {
         matches!(preview, KeyPreview::Char(_) | KeyPreview::Space)
@@ -300,7 +391,7 @@ impl DogkbdApp {
             self.has_input_since_enter = true;
 
             // Track text characters for treat threshold
-            let claude_idle = !self.claude_busy.load(Ordering::Relaxed);
+            let claude_idle = !self.is_effectively_busy();
             // Backspace decrements count (but not below 0)
             if matches!(preview, KeyPreview::Backspace) {
                 self.text_char_count = self.text_char_count.saturating_sub(1);
@@ -336,6 +427,19 @@ impl DogkbdApp {
             if self.key_preview.len() > MAX_PREVIEW_KEYS {
                 self.key_preview.remove(0);
             }
+
+            // Schedule backspace if typing during busy state with no pending backspace
+            if self.is_effectively_busy()
+                && self.has_input_since_enter
+                && self.busy_backspace_at.is_none()
+            {
+                println!(
+                    "[busy-backspace] Scheduling backspace in {}s (new input during busy, text_char_count: {})",
+                    BUSY_BACKSPACE_TIMEOUT_SECS, self.text_char_count
+                );
+                self.busy_backspace_at =
+                    Some(Instant::now() + Duration::from_secs(BUSY_BACKSPACE_TIMEOUT_SECS));
+            }
         }
 
         // Inject if armed and target window is foreground
@@ -365,8 +469,8 @@ impl DogkbdApp {
 
     /// Check and handle idle timeout (auto-enter and sequence reset)
     fn check_idle_timeout(&mut self) {
-        // Don't auto-enter while Claude Code is processing
-        if self.claude_busy.load(Ordering::Relaxed) {
+        // Don't auto-enter while Claude Code is processing (or in grace period)
+        if self.is_effectively_busy() {
             return;
         }
 
@@ -408,32 +512,24 @@ impl DogkbdApp {
         }
     }
 
-    /// Check and handle periodic auto-enter
+    /// Check and handle periodic auto-enter (only during busy state)
     fn check_periodic_enter(&mut self) {
-        // Don't periodic-enter while Claude Code is processing
-        if self.claude_busy.load(Ordering::Relaxed) {
+        // Only periodic-enter while Claude Code is effectively busy
+        if !self.is_effectively_busy() {
+            return;
+        }
+
+        // Don't send periodic enter if there's buffered text (wait for backspace-out first)
+        if self.has_input_since_enter {
             return;
         }
 
         if self.periodic_enter_enabled {
             let elapsed = self.last_periodic_enter.elapsed();
             if elapsed >= Duration::from_secs(self.periodic_enter_interval) {
-                // Only inject if there's actual input to submit
-                if self.has_input_since_enter {
-                    println!(
-                        "[periodic] Periodic auto-enter firing (chars: {}, idle_chars: {}, treat_dispensed_this_idle: {})",
-                        self.text_char_count, self.idle_char_count, self.treat_dispensed_this_idle
-                    );
-                    if self.inject_enter() {
-                        self.status = "Periodic auto-enter injected".to_string();
-                        if self.validation_tone_enabled {
-                            self.chime_pending = true;
-                        }
-                    }
-                    // Reset sequence counters after submission
-                    self.text_char_count = 0;
-                    self.idle_char_count = 0;
-                    self.validation_tone_played = false;
+                println!("[periodic] Periodic auto-enter firing (busy state, no buffered text)");
+                if self.inject_enter() {
+                    self.status = "Periodic auto-enter injected (busy)".to_string();
                 }
                 self.last_periodic_enter = Instant::now();
             }
@@ -446,30 +542,65 @@ impl eframe::App for DogkbdApp {
         // Reset per-frame flags
         self.enter_injected_this_frame = false;
 
-        // Detect state transitions
+        // Detect state transitions (with debounced busy→idle)
         let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
-        if !claude_busy_now && self.claude_was_busy {
-            // busy → idle transition
-            println!("[state] Claude: busy → idle (treat_dispensed_this_idle was {}, resetting to false)", self.treat_dispensed_this_idle);
-            self.last_periodic_enter = Instant::now();
-            self.treat_dispensed_this_idle = false;
-            if self.chime_pending {
-                println!("[state] Playing deferred chime");
-                self.play_validation_tone();
-                self.chime_pending = false;
+        if let Some(at) = self.idle_transition_at {
+            // In grace period — waiting to confirm busy→idle
+            if claude_busy_now {
+                // Claude went back to busy — cancel idle transition, stay busy
+                println!(
+                    "[state] Claude went busy during {}s idle grace period — staying busy",
+                    IDLE_TRANSITION_DELAY_SECS
+                );
+                self.idle_transition_at = None;
+            } else if Instant::now() >= at {
+                // Grace period elapsed, truly idle — execute busy→idle transition
+                println!(
+                    "[state] Claude: busy → idle (confirmed after {}s, treat_dispensed_this_idle was {}, resetting to false)",
+                    IDLE_TRANSITION_DELAY_SECS, self.treat_dispensed_this_idle
+                );
+                self.last_periodic_enter = Instant::now();
+                self.treat_dispensed_this_idle = false;
+                self.busy_backspace_at = None;
+                if self.chime_pending {
+                    println!("[state] Playing deferred chime");
+                    self.play_validation_tone();
+                    self.chime_pending = false;
+                }
+                // Bring target window to foreground so dog's next keystrokes land there
+                #[cfg(windows)]
+                if let Some(ref target) = self.target_window {
+                    println!("[state] Focusing target window: {}", target.display_name());
+                    crate::target::set_foreground(target.hwnd);
+                }
+                self.idle_transition_at = None;
+                self.claude_was_busy = false;
             }
-            // Bring target window to foreground so dog's next keystrokes land there
-            #[cfg(windows)]
-            if let Some(ref target) = self.target_window {
-                println!("[state] Focusing target window: {}", target.display_name());
-                crate::target::set_foreground(target.hwnd);
-            }
+            // else: still in grace period, wait
+        } else if !claude_busy_now && self.claude_was_busy {
+            // Raw busy→idle detected — start grace period
+            println!(
+                "[state] Claude raw busy → idle, starting {}s grace period",
+                IDLE_TRANSITION_DELAY_SECS
+            );
+            self.idle_transition_at =
+                Some(Instant::now() + Duration::from_secs(IDLE_TRANSITION_DELAY_SECS));
+            // Don't update claude_was_busy — stays true during grace period
         } else if claude_busy_now && !self.claude_was_busy {
             // idle → busy transition
             println!("[state] Claude: idle → busy (resetting idle_char_count from {})", self.idle_char_count);
             self.idle_char_count = 0;
+            // Schedule backspace if there's buffered text
+            if self.has_input_since_enter && self.busy_backspace_at.is_none() {
+                println!(
+                    "[state] Scheduling busy backspace in {}s (text_char_count: {})",
+                    BUSY_BACKSPACE_TIMEOUT_SECS, self.text_char_count
+                );
+                self.busy_backspace_at =
+                    Some(Instant::now() + Duration::from_secs(BUSY_BACKSPACE_TIMEOUT_SECS));
+            }
+            self.claude_was_busy = claude_busy_now;
         }
-        self.claude_was_busy = claude_busy_now;
 
         // Process any pending keys
         self.process_keys();
@@ -486,6 +617,7 @@ impl eframe::App for DogkbdApp {
         }
 
         // Check timer-based features
+        self.check_busy_backspace();
         self.check_idle_timeout();
         self.check_periodic_enter();
 
@@ -502,7 +634,9 @@ impl eframe::App for DogkbdApp {
                 ui.separator();
                 ui.label(format!("Injected: {}", self.inject_count));
                 ui.separator();
-                if self.claude_busy.load(Ordering::Relaxed) {
+                if self.idle_transition_at.is_some() {
+                    ui.colored_label(egui::Color32::YELLOW, "Claude: settling...");
+                } else if self.is_effectively_busy() {
                     ui.colored_label(egui::Color32::YELLOW, "Claude: busy");
                 } else {
                     ui.colored_label(egui::Color32::GREEN, "Claude: idle");
@@ -557,6 +691,8 @@ impl eframe::App for DogkbdApp {
                     self.last_input_time = None;
                     self.last_periodic_enter = Instant::now();
                     self.treat_dispense_at = None;
+                    self.busy_backspace_at = None;
+                    self.idle_transition_at = None;
                     self.key_preview.clear();
                     self.status = "State reset".to_string();
                 }
@@ -779,8 +915,8 @@ mod tests {
 
     #[test]
     fn test_validation_char_threshold() {
-        // Threshold should be 10
-        assert_eq!(VALIDATION_CHAR_THRESHOLD, 10);
+        // Threshold should be 16
+        assert_eq!(VALIDATION_CHAR_THRESHOLD, 16);
     }
 
     #[test]
