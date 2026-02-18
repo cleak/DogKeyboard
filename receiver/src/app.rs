@@ -562,11 +562,11 @@ impl eframe::App for DogkbdApp {
                 self.last_periodic_enter = Instant::now();
                 self.treat_dispensed_this_idle = false;
                 self.busy_backspace_at = None;
-                if self.chime_pending {
-                    println!("[state] Playing deferred chime");
+                if self.validation_tone_enabled {
+                    println!("[state] Playing chime on busy→idle transition");
                     self.play_validation_tone();
-                    self.chime_pending = false;
                 }
+                self.chime_pending = false;
                 // Bring target window to foreground so dog's next keystrokes land there
                 #[cfg(windows)]
                 if let Some(ref target) = self.target_window {
