@@ -24,5 +24,8 @@ Thumbs.db
 *.log
 *.pdb
 
+# Docs (internal notes, not published)
+docs/
+
 # Local scripts
 pi-*.ps1
