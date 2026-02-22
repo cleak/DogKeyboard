@@ -13,5 +13,16 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Local Pi deploy scripts
+# Secrets & env
+*.secret
+.env*
+
+# Claude Code
+.claude/
+
+# Logs & debug symbols
+*.log
+*.pdb
+
+# Local scripts
 pi-*.ps1
