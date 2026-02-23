@@ -136,6 +136,11 @@ sudo ./target/release/dogkbd-sender --device /dev/input/dogkbd
 | 14 | 1 | Modifiers (bit 0 = shift) |
 | 15 | 1 | HID usage code |
 
+## Related Projects
+
+- **[Quasar Saz](https://github.com/cleak/quasar-saz)** - The finished game made with this system, designed by Momo and developed by Claude Code ([watch the video](https://youtu.be/8BbPlPou3Bg))
+- **[tea-leaves](https://github.com/cleak/tea-leaves)** - The base Godot project with all the tools and guardrails for making a game with Claude Code
+
 ## License
 
 MIT
