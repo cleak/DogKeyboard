@@ -29,3 +29,6 @@ docs/
 
 # Local scripts
 pi-*.ps1
+
+# Collected dog prompt data (runtime output, not source)
+dogkbd_prompts*.jsonl

@@ -5,6 +5,7 @@ use crate::target::WindowInfo;
 use dogkbd_proto::KeyTap;
 use eframe::egui;
 use rodio::{Decoder, OutputStream, Sink};
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -31,6 +32,57 @@ const VALIDATION_CHAR_THRESHOLD: usize = 16;
 
 /// Minimum text characters typed while Claude is idle
 const IDLE_CHAR_THRESHOLD: usize = 4;
+
+// --- Collection mode tuning ---
+/// Minimum characters before a prompt is eligible to save on idle. Shorter
+/// buffers keep accumulating across pauses — they are never discarded.
+const COLLECT_MIN_CHARS: usize = 9;
+/// At/above this many characters the prompt is considered "long" and is saved
+/// after a shorter idle gap (nudges the dog on to the next prompt).
+const COLLECT_LONG_CHARS: usize = 16;
+/// Idle seconds before saving a long (16+ char) prompt.
+const COLLECT_IDLE_SHORT_SECS: u64 = 2;
+/// Idle seconds before saving a normal (9-15 char) prompt.
+const COLLECT_IDLE_LONG_SECS: u64 = 5;
+/// Default collection target shown in the UI.
+const COLLECT_DEFAULT_TARGET: u64 = 100;
+/// Number of recently-saved prompts to keep for the UI list.
+const RECENT_PROMPTS_SHOWN: usize = 10;
+
+/// Operating mode. The two modes are mutually exclusive: Normal injects to a
+/// target window with the auto-enter/treat machinery; Collect purely records
+/// the dog's prompts to a file with no injection or treats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppMode {
+    Normal,
+    Collect,
+}
+
+/// One saved prompt, serialized as a single JSONL line.
+#[derive(Serialize)]
+struct CollectRecord<'a> {
+    /// Unix epoch milliseconds at save time.
+    ts_ms: u64,
+    /// 1-based sequence number within the output file.
+    seq: u64,
+    /// The text the dog typed for this prompt.
+    text: &'a str,
+}
+
+/// Current Unix time in milliseconds (0 if the clock is before the epoch).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Filename for a fresh collection session: `dogkbd_prompts_<local-timestamp>.jsonl`.
+/// Each app launch gets its own file so sessions never share data.
+fn default_session_path() -> String {
+    let ts = chrono::Local::now().format("%Y-%m-%d_%H-%M-%S");
+    format!("dogkbd_prompts_{}.jsonl", ts)
+}
 
 /// Application state
 pub struct DogkbdApp {
@@ -120,6 +172,20 @@ pub struct DogkbdApp {
     // Idle transition debounce
     /// Pending busy→idle transition time (grace period to absorb thrashing)
     idle_transition_at: Option<Instant>,
+
+    // Collection mode (pure capture)
+    /// Current operating mode (mutually exclusive with Normal).
+    mode: AppMode,
+    /// Accumulating text of the dog's in-progress prompt.
+    current_prompt: String,
+    /// Output file path for collected prompts (JSONL, append).
+    collect_path: String,
+    /// Prompts written to the current file (seeded from the file on entry).
+    collected_count: u64,
+    /// Display-only target number of prompts.
+    collect_target: u64,
+    /// Ring buffer of recently saved prompts for the UI.
+    recent_prompts: VecDeque<String>,
 }
 
 impl DogkbdApp {
@@ -187,6 +253,14 @@ impl DogkbdApp {
 
             // Idle transition debounce
             idle_transition_at: None,
+
+            // Collection mode (Normal by default — preserves existing behavior)
+            mode: AppMode::Normal,
+            current_prompt: String::new(),
+            collect_path: default_session_path(),
+            collected_count: 0,
+            collect_target: COLLECT_DEFAULT_TARGET,
+            recent_prompts: VecDeque::new(),
         };
         app.refresh_windows();
         app
@@ -314,6 +388,9 @@ impl DogkbdApp {
 
     /// Check if buffered text should be backspaced out during busy state
     fn check_busy_backspace(&mut self) {
+        if self.mode != AppMode::Normal {
+            return;
+        }
         if !self.is_effectively_busy() {
             return;
         }
@@ -373,13 +450,21 @@ impl DogkbdApp {
 
     /// Process a single key tap (preview, treat dispense, injection)
     fn process_single_tap(&mut self, tap: &KeyTap) {
-        // Ignore all input when not armed — no counting, no preview, no injection
-        if !self.armed {
+        // Filter out Enter key entirely (filtered in net.rs too, this is a safety belt)
+        if tap.hid_code == 0x28 {
             return;
         }
 
-        // Filter out Enter key entirely (filtered in net.rs too, this is a safety belt)
-        if tap.hid_code == 0x28 {
+        // Collection mode: pure capture. Accumulate regardless of arm state —
+        // nothing is injected, so there's no reason to gate saving behind ARM.
+        if self.mode == AppMode::Collect {
+            self.last_input_time = Some(Instant::now());
+            self.process_tap_collect(tap);
+            return;
+        }
+
+        // Normal mode: ignore all input when not armed (keys would be injected).
+        if !self.armed {
             return;
         }
 
@@ -469,6 +554,9 @@ impl DogkbdApp {
 
     /// Check and handle idle timeout (auto-enter and sequence reset)
     fn check_idle_timeout(&mut self) {
+        if self.mode != AppMode::Normal {
+            return;
+        }
         // Don't auto-enter while Claude Code is processing (or in grace period)
         if self.is_effectively_busy() {
             return;
@@ -514,6 +602,9 @@ impl DogkbdApp {
 
     /// Check and handle periodic auto-enter (only during busy state)
     fn check_periodic_enter(&mut self) {
+        if self.mode != AppMode::Normal {
+            return;
+        }
         // Only periodic-enter while Claude Code is effectively busy
         if !self.is_effectively_busy() {
             return;
@@ -535,6 +626,233 @@ impl DogkbdApp {
             }
         }
     }
+
+    /// Reset transient state when switching modes; seed the collect counter.
+    fn on_mode_changed(&mut self) {
+        // Clear in-progress buffers/timers from both pipelines.
+        self.current_prompt.clear();
+        self.key_preview.clear();
+        self.last_input_time = None;
+        self.has_input_since_enter = false;
+        self.text_char_count = 0;
+        self.idle_char_count = 0;
+        self.treat_dispense_at = None;
+        self.busy_backspace_at = None;
+        self.idle_transition_at = None;
+        self.validation_tone_played = false;
+        self.chime_pending = false;
+
+        match self.mode {
+            AppMode::Collect => {
+                self.collected_count = Self::count_existing_prompts(&self.collect_path);
+                self.recent_prompts.clear();
+                self.status = format!(
+                    "Collect mode — {} prompt(s) already in {}",
+                    self.collected_count, self.collect_path
+                );
+            }
+            AppMode::Normal => {
+                self.status = "Normal mode".to_string();
+            }
+        }
+    }
+
+    /// Count non-blank lines already present in the output file (0 if missing).
+    fn count_existing_prompts(path: &str) -> u64 {
+        std::fs::read_to_string(path)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Accumulate one tap into the current prompt buffer (collection mode).
+    fn process_tap_collect(&mut self, tap: &KeyTap) {
+        if let Some(preview) = KeyPreview::from_tap(tap) {
+            match preview {
+                KeyPreview::Backspace => {
+                    self.current_prompt.pop();
+                }
+                KeyPreview::Space => self.current_prompt.push(' '),
+                KeyPreview::Char(c) => self.current_prompt.push(c),
+                // Enter/AutoEnter never reach here (Enter is filtered upstream).
+                KeyPreview::Enter | KeyPreview::AutoEnter => {}
+            }
+            self.key_preview.push(preview);
+            if self.key_preview.len() > MAX_PREVIEW_KEYS {
+                self.key_preview.remove(0);
+            }
+        }
+    }
+
+    /// Save the current prompt as one JSONL line, then clear the buffer.
+    /// On a write error the buffer is preserved so data isn't lost.
+    fn flush_collect_prompt(&mut self) {
+        if self.current_prompt.is_empty() {
+            return;
+        }
+        let line = match serde_json::to_string(&CollectRecord {
+            ts_ms: now_ms(),
+            seq: self.collected_count + 1,
+            text: &self.current_prompt,
+        }) {
+            Ok(l) => l,
+            Err(e) => {
+                self.error = Some(format!("Prompt serialize failed: {}", e));
+                return;
+            }
+        };
+
+        use std::io::Write;
+        let result = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.collect_path)
+            .and_then(|mut f| writeln!(f, "{}", line));
+
+        match result {
+            Ok(()) => {
+                self.collected_count += 1;
+                self.error = None;
+                let text = std::mem::take(&mut self.current_prompt);
+                println!("[collect] Saved prompt #{}: {:?}", self.collected_count, text);
+                self.recent_prompts.push_back(text);
+                while self.recent_prompts.len() > RECENT_PROMPTS_SHOWN {
+                    self.recent_prompts.pop_front();
+                }
+                self.status = format!("Collected {} prompt(s)", self.collected_count);
+            }
+            Err(e) => {
+                self.error = Some(format!("Save failed ({}): {}", self.collect_path, e));
+            }
+        }
+    }
+
+    /// Save the current prompt once typing has been idle long enough. Long
+    /// prompts (16+ chars) save after 2s; normal prompts (9+ chars) after 5s.
+    /// Buffers under 9 chars never time out — they keep accumulating until they
+    /// reach the threshold.
+    fn check_collect_timeout(&mut self) {
+        if self.mode != AppMode::Collect {
+            return;
+        }
+        let last = match self.last_input_time {
+            Some(t) => t,
+            None => return,
+        };
+        if self.current_prompt.is_empty() {
+            return;
+        }
+
+        let idle = last.elapsed();
+        let len = self.current_prompt.chars().count();
+        let save = (len >= COLLECT_LONG_CHARS
+            && idle >= Duration::from_secs(COLLECT_IDLE_SHORT_SECS))
+            || (len >= COLLECT_MIN_CHARS && idle >= Duration::from_secs(COLLECT_IDLE_LONG_SECS));
+
+        if save {
+            self.flush_collect_prompt();
+            self.last_input_time = None;
+        }
+        // Buffers under COLLECT_MIN_CHARS are left untouched — they keep
+        // accumulating across pauses until they reach the save threshold.
+    }
+
+    /// Render the collection-mode UI panel.
+    fn collect_ui(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Collect Prompts");
+        ui.label(
+            "Pure capture: no injection, no treats. Each session writes its own timestamped file.",
+        );
+        ui.add_space(4.0);
+
+        // Output file path
+        ui.horizontal(|ui| {
+            ui.label("File:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.collect_path)
+                    .desired_width(ui.available_width() - 10.0),
+            );
+            if resp.changed() {
+                self.collected_count = Self::count_existing_prompts(&self.collect_path);
+            }
+        });
+        // Resolved absolute path (best-effort)
+        let shown = std::fs::canonicalize(&self.collect_path)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| {
+                std::env::current_dir()
+                    .map(|d| d.join(&self.collect_path).display().to_string())
+                    .unwrap_or_else(|_| self.collect_path.clone())
+            });
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.colored_label(egui::Color32::GRAY, shown);
+        });
+
+        ui.add_space(6.0);
+
+        // Goal (purely a visual marker — never caps how many prompts are saved)
+        ui.horizontal(|ui| {
+            ui.label("Goal:");
+            ui.add(egui::Slider::new(&mut self.collect_target, 10..=1000).suffix(" prompts"));
+        });
+
+        ui.add_space(6.0);
+
+        // Progress (the goal is just a marker; collection is unbounded)
+        let color = if self.collected_count >= self.collect_target {
+            egui::Color32::GREEN
+        } else {
+            egui::Color32::LIGHT_BLUE
+        };
+        ui.colored_label(
+            color,
+            egui::RichText::new(format!(
+                "Collected: {}   (goal: {})",
+                self.collected_count, self.collect_target
+            ))
+            .heading(),
+        );
+        ui.colored_label(
+            egui::Color32::GREEN,
+            "● Capturing — no arming needed; every prompt is saved to the file automatically.",
+        );
+
+        ui.add_space(6.0);
+
+        // Current in-progress prompt
+        let len = self.current_prompt.chars().count();
+        let window = if len >= COLLECT_LONG_CHARS {
+            format!("saves after {}s idle", COLLECT_IDLE_SHORT_SECS)
+        } else if len >= COLLECT_MIN_CHARS {
+            format!("saves after {}s idle", COLLECT_IDLE_LONG_SECS)
+        } else {
+            format!("needs {}+ chars to save", COLLECT_MIN_CHARS)
+        };
+        ui.label(format!("Current prompt ({} chars — {}):", len, window));
+        ui.add(
+            egui::TextEdit::multiline(&mut self.current_prompt.as_str())
+                .desired_width(f32::INFINITY)
+                .desired_rows(2)
+                .font(egui::TextStyle::Monospace),
+        );
+
+        ui.add_space(6.0);
+
+        // Recently saved prompts
+        ui.label("Recently saved:");
+        egui::ScrollArea::vertical()
+            .max_height(150.0)
+            .id_salt("recent_prompts")
+            .show(ui, |ui| {
+                if self.recent_prompts.is_empty() {
+                    ui.colored_label(egui::Color32::GRAY, "(none yet)");
+                } else {
+                    for (i, p) in self.recent_prompts.iter().rev().enumerate() {
+                        ui.label(format!("{}. {}", self.collected_count - i as u64, p));
+                    }
+                }
+            });
+    }
 }
 
 impl eframe::App for DogkbdApp {
@@ -543,6 +861,7 @@ impl eframe::App for DogkbdApp {
         self.enter_injected_this_frame = false;
 
         // Detect state transitions (with debounced busy→idle)
+        if self.mode == AppMode::Normal {
         let claude_busy_now = self.claude_busy.load(Ordering::Relaxed);
         if let Some(at) = self.idle_transition_at {
             // In grace period — waiting to confirm busy→idle
@@ -602,6 +921,8 @@ impl eframe::App for DogkbdApp {
             self.claude_was_busy = claude_busy_now;
         }
 
+        }
+
         // Process any pending keys
         self.process_keys();
 
@@ -620,6 +941,7 @@ impl eframe::App for DogkbdApp {
         self.check_busy_backspace();
         self.check_idle_timeout();
         self.check_periodic_enter();
+        self.check_collect_timeout();
 
         // Request repaint to check for new keys and timers
         ctx.request_repaint_after(Duration::from_millis(16));
@@ -651,7 +973,8 @@ impl eframe::App for DogkbdApp {
 
             ui.separator();
 
-            // Arm toggle
+            // Arm toggle (Normal mode only — Collect captures without arming)
+            if self.mode == AppMode::Normal {
             ui.horizontal(|ui| {
                 let arm_text = if self.armed { "ARMED" } else { "DISARMED" };
                 let arm_color = if self.armed {
@@ -697,8 +1020,26 @@ impl eframe::App for DogkbdApp {
                     self.status = "State reset".to_string();
                 }
             });
+            } // end arm toggle (Normal mode only)
 
             ui.separator();
+
+            // Mode selector (Normal injection vs. Collect prompts — mutually exclusive)
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                let old_mode = self.mode;
+                ui.selectable_value(&mut self.mode, AppMode::Normal, "Normal (inject)");
+                ui.selectable_value(&mut self.mode, AppMode::Collect, "Collect prompts");
+                if self.mode != old_mode {
+                    self.on_mode_changed();
+                }
+            });
+
+            ui.separator();
+
+            if self.mode == AppMode::Collect {
+                self.collect_ui(ui);
+            } else {
 
             // Window selection
             ui.label("Target Window:");
@@ -847,6 +1188,8 @@ impl eframe::App for DogkbdApp {
                     }
                 });
 
+            } // end Normal-mode sections (window + auto features)
+
             ui.separator();
 
             // Key preview
@@ -929,5 +1272,66 @@ mod tests {
     fn test_max_preview_keys() {
         // Max preview should be 50
         assert_eq!(MAX_PREVIEW_KEYS, 50);
+    }
+
+    #[test]
+    fn test_collect_record_serializes_to_jsonl() {
+        let line = serde_json::to_string(&CollectRecord {
+            ts_ms: 1_700_000_000_000,
+            seq: 7,
+            text: "good dog",
+        })
+        .unwrap();
+        assert_eq!(line, r#"{"ts_ms":1700000000000,"seq":7,"text":"good dog"}"#);
+        // One record must serialize to a single line (no embedded newline).
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn test_collect_record_escapes_special_chars() {
+        // Text with quotes/backslashes must stay valid JSON on one line.
+        let line = serde_json::to_string(&CollectRecord {
+            ts_ms: 0,
+            seq: 1,
+            text: "a\"b\\c",
+        })
+        .unwrap();
+        assert!(line.contains(r#"\"b\\c"#));
+        assert!(!line.contains('\n'));
+    }
+
+    #[test]
+    fn test_count_existing_prompts() {
+        let path = std::env::temp_dir()
+            .join(format!("dogkbd_count_{}.jsonl", std::process::id()));
+        let p = path.to_str().unwrap();
+
+        // Missing file counts as 0.
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(DogkbdApp::count_existing_prompts(p), 0);
+
+        // Three records plus a trailing blank line → 3.
+        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n{\"a\":3}\n\n").unwrap();
+        assert_eq!(DogkbdApp::count_existing_prompts(p), 3);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_session_path_format() {
+        let p = default_session_path();
+        // Per-session name, filesystem-safe (no colons on Windows).
+        assert!(p.starts_with("dogkbd_prompts_"));
+        assert!(p.ends_with(".jsonl"));
+        assert!(!p.contains(':'));
+    }
+
+    #[test]
+    fn test_collect_thresholds() {
+        // Long prompts save faster than normal ones; min is below long.
+        assert!(COLLECT_LONG_CHARS > COLLECT_MIN_CHARS);
+        assert!(COLLECT_IDLE_SHORT_SECS < COLLECT_IDLE_LONG_SECS);
+        assert_eq!(COLLECT_MIN_CHARS, 9);
+        assert_eq!(COLLECT_LONG_CHARS, 16);
     }
 }
