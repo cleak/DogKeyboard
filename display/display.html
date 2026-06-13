@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOGKBD — Momo at Work</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --panel: #12161d;
+    --panel-2: #161b24;
+    --line: #232b38;
+    --ink: #e8edf4;
+    --muted: #7d8896;
+    --gold: #e7b54a;
+    --game: #5ad1b0;
+    --trophy: #e7b54a;
+    --live: #6aa8ff;
+    --bad: #ff5d5d;
+    --ok: #57d97a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 800px at 80% -10%, #15202e 0%, transparent 60%),
+      radial-gradient(900px 600px at -10% 110%, #1a1410 0%, transparent 55%),
+      var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, "Segoe UI", Inter, system-ui, sans-serif;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Header ─────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+  }
+  .brand { font-weight: 800; letter-spacing: 0.18em; font-size: 20px; }
+  .brand .paw { color: var(--gold); }
+  .brand small { display:block; letter-spacing: 0.05em; font-weight:500; font-size:11px; color: var(--muted); }
+  .chips { display: flex; gap: 10px; margin-left: 8px; }
+  .chip {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 12px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    font-size: 13px; transition: all .25s ease;
+  }
+  .chip .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .chip.busy .dot { background: var(--bad); box-shadow: 0 0 10px var(--bad); }
+  .chip.ready .dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .chip.active { border-color: var(--gold); background: #1e1b12; }
+  .chip .st { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  .spacer { flex: 1; }
+  .conn { display:flex; align-items:center; gap:8px; font-size: 12px; color: var(--muted); }
+  .conn .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); transition: background .3s; }
+  .conn.live .dot { background: var(--ok); box-shadow: 0 0 10px var(--ok); }
+  .counters { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+  .counters b { color: var(--ink); }
+  .counters .drop { color: var(--bad); }
+
+  /* ── Layout ─────────────────────────────────────────── */
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.15fr 1fr 1fr;
+    gap: 18px;
+    padding: 18px 28px 24px;
+    min-height: 0;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+  }
+  .panel > .accent { position:absolute; inset: 0 auto 0 0; width: 4px; }
+  .panel.live  > .accent { background: var(--live); }
+  .panel.game  > .accent { background: var(--game); }
+  .panel.trophy> .accent { background: var(--trophy); }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .16em;
+    color: var(--muted); margin-bottom: 4px; display:flex; align-items:center; gap:10px;
+  }
+  .panel .sub { font-size: 12px; color: var(--muted); margin-bottom: 16px; min-height: 16px; }
+
+  /* ── Panel 1: live keys ─────────────────────────────── */
+  .keys {
+    flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start;
+    gap: 8px; overflow: hidden;
+  }
+  .k {
+    font-family: "SF Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 40px; line-height: 1;
+    padding: 10px 14px; border-radius: 12px;
+    background: var(--panel-2); border: 1px solid var(--line);
+    animation: pop .18s ease-out;
+  }
+  .k.special { font-size: 20px; color: var(--live); align-self:center; padding: 16px 14px; }
+  .k.blocked { color: var(--bad); border-color: var(--bad); opacity:.8; }
+  @keyframes pop { from { transform: scale(1.5); opacity:.2; } to { transform: scale(1); opacity:1; } }
+  .buffer {
+    margin-top: 14px; padding: 14px 16px; border-radius: 12px;
+    background: #0e1217; border: 1px dashed var(--line);
+    font-family: ui-monospace, monospace; font-size: 18px; min-height: 52px;
+    color: var(--ink); word-break: break-word;
+  }
+  .buffer .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing:.1em; display:block; margin-bottom:6px; }
+  .buffer .caret { display:inline-block; width:10px; background: var(--live); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── Panels 2 & 3 shared ────────────────────────────── */
+  .big { font-size: 30px; font-weight: 800; line-height: 1.1; margin-bottom: 14px; }
+  .game .big { color: var(--game); }
+  .trophy .big { color: var(--gold); }
+  .meta { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 14px; margin-bottom: 18px; }
+  .meta dt { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing:.08em; align-self:center; }
+  .meta dd { font-variant-numeric: tabular-nums; }
+  .badge { display:inline-block; padding: 3px 10px; border-radius:999px; font-size:12px; border:1px solid var(--line); }
+  .badge.ready { color: var(--ok); border-color: var(--ok); }
+  .badge.wait { color: var(--muted); }
+  .ioblock { margin-top: auto; }
+  .iorow { padding: 12px 14px; border-radius: 12px; background: var(--panel-2); border:1px solid var(--line); margin-top: 10px; }
+  .iorow .label { font-size: 11px; text-transform: uppercase; letter-spacing:.1em; color: var(--muted); display:block; margin-bottom:6px; }
+  .iorow .val { font-family: ui-monospace, monospace; font-size: 15px; word-break: break-word; color: var(--ink); }
+  .iorow .val.empty { color: var(--muted); font-style: italic; font-family: inherit; }
+  .integbar { height: 8px; border-radius:999px; background: #2a1414; overflow:hidden; margin-top:4px; }
+  .integbar > i { display:block; height:100%; background: linear-gradient(90deg,#ff5d5d,#57d97a); transition: width .4s; }
+
+  /* dispatch flash */
+  .flash {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%);
+    background: var(--gold); color: #1a1306; font-weight: 700;
+    padding: 12px 22px; border-radius: 999px; font-size: 15px;
+    box-shadow: 0 10px 40px rgba(231,181,74,.35);
+    opacity: 0; pointer-events:none; transition: opacity .3s, transform .3s;
+  }
+  .flash.show { opacity: 1; transform: translateX(-50%) translateY(-6px); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">DOG<span class="paw">🐾</span>KBD<small>activitiesforhumans.com — Momo at work</small></div>
+    <div class="chips" id="chips"></div>
+    <div class="spacer"></div>
+    <div class="counters" id="counters">events <b>0</b> · dropped <span class="drop">0</span></div>
+    <div class="conn" id="conn"><span class="dot"></span><span class="txt">connecting…</span></div>
+  </header>
+
+  <main>
+    <section class="panel live">
+      <div class="accent"></div>
+      <h2>① Live Keys</h2>
+      <div class="sub" id="liveSub">what Momo is typing, key by key</div>
+      <div class="keys" id="keys"></div>
+      <div class="buffer"><span class="label">current buffer <span id="bufRoute"></span></span><span id="bufText"></span><span class="caret">&nbsp;</span></div>
+    </section>
+
+    <section class="panel game">
+      <div class="accent"></div>
+      <h2>② Current Game <span id="gameBadge"></span></h2>
+      <div class="sub">Tea Leaves — built live from Momo's input</div>
+      <div class="big" id="gameState">—</div>
+      <dl class="meta">
+        <dt>Wave</dt><dd id="gameWave">—</dd>
+        <dt>Score</dt><dd id="gameScore">—</dd>
+        <dt>Dam</dt><dd><span id="gameInteg">—</span><div class="integbar"><i id="gameIntegBar" style="width:0%"></i></div></dd>
+      </dl>
+      <div class="ioblock">
+        <div class="iorow"><span class="label">Her last input</span><span class="val empty" id="gameInput">— none yet —</span></div>
+        <div class="iorow"><span class="label">Decoded</span><span class="val empty" id="gameDecoded">—</span></div>
+      </div>
+    </section>
+
+    <section class="panel trophy">
+      <div class="accent"></div>
+      <h2>③ Current Trophy</h2>
+      <div class="sub" id="trophySub">Trophy Factory — Momo awards herself</div>
+      <div class="big" id="trophyTitle">—</div>
+      <dl class="meta">
+        <dt>Family</dt><dd id="trophyFamily">—</dd>
+        <dt>Topper</dt><dd id="trophyTopper">—</dd>
+        <dt>Status</dt><dd id="trophyStatus">—</dd>
+      </dl>
+      <div class="ioblock">
+        <div class="iorow"><span class="label">Her input (burst)</span><span class="val empty" id="trophyBurst">— none yet —</span></div>
+        <div class="iorow"><span class="label">Decoded into</span><span class="val empty" id="trophyDecoded">—</span></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="flash" id="flash"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const KEY_LIFETIME = 6000;
+  const MAX_KEYS = 28;
+
+  let events = 0, dropped = 0;
+  const lastSeq = {}; // run_id -> seq, for client-side drop detection
+
+  // ── Connection ────────────────────────────────────────
+  function setConn(live) {
+    const el = $("conn");
+    el.classList.toggle("live", live);
+    el.querySelector(".txt").textContent = live ? "live" : "reconnecting…";
+  }
+
+  function bumpCounters(ev) {
+    events++;
+    const prev = lastSeq[ev.run_id];
+    if (prev !== undefined && ev.seq > prev + 1) dropped += ev.seq - prev - 1;
+    lastSeq[ev.run_id] = ev.seq;
+    $("counters").innerHTML = `events <b>${events}</b> · dropped <span class="drop">${dropped}</span>`;
+  }
+
+  // ── Panel 1: live keys ────────────────────────────────
+  function pushKey(ev) {
+    const wrap = $("keys");
+    const span = document.createElement("span");
+    const special = { SPACE: "␣", ENTER: "⏎", BACKSPACE: "⌫" };
+    let cls = "k";
+    let text = ev.decoded;
+    if (special[ev.decoded]) { cls += " special"; text = special[ev.decoded]; }
+    if (ev.disposition === "blocked") { cls += " blocked"; }
+    span.className = cls;
+    span.textContent = text;
+    wrap.appendChild(span);
+    while (wrap.children.length > MAX_KEYS) wrap.removeChild(wrap.firstChild);
+    setTimeout(() => span.remove(), KEY_LIFETIME);
+  }
+
+  function setBuffer(ev) {
+    $("bufText").textContent = ev.text || "";
+    $("bufRoute").textContent = ev.route ? `→ ${ev.route}` : "";
+  }
+
+  // ── Panel 2: game ─────────────────────────────────────
+  function setGame(ev) {
+    $("gameState").textContent = ev.state || ev.phase || "—";
+    $("gameWave").textContent = ev.wave ?? "—";
+    $("gameScore").textContent = ev.score ?? "—";
+    const integ = Math.max(0, Math.min(100, ev.integrity || 0));
+    $("gameInteg").textContent = integ.toFixed(0) + "%";
+    $("gameIntegBar").style.width = integ + "%";
+    const badge = $("gameBadge");
+    badge.className = "badge " + (ev.ready ? "ready" : "wait");
+    badge.textContent = ev.ready ? "READY FOR INPUT" : "busy";
+    setIO("gameInput", ev.last_input);
+    setIO("gameDecoded", ev.last_input_decoded);
+  }
+
+  // ── Panel 3: trophy ───────────────────────────────────
+  function setTrophy(ev) {
+    $("trophyTitle").textContent = ev.award_title || "—";
+    $("trophyFamily").textContent = ev.family || "—";
+    $("trophyTopper").textContent = ev.topper || "—";
+    $("trophyStatus").textContent = ev.status || "—";
+    setIO("trophyBurst", ev.source_burst);
+    setIO("trophyDecoded", ev.award_title);
+  }
+
+  function setIO(id, val) {
+    const el = $(id);
+    if (val && String(val).length) { el.textContent = val; el.classList.remove("empty"); }
+  }
+
+  // ── Header chips (routes) ─────────────────────────────
+  function setHello(ev) {
+    const chips = $("chips");
+    chips.innerHTML = "";
+    (ev.routes || []).forEach((r) => {
+      const c = document.createElement("div");
+      let cls = "chip";
+      if (r.busy) cls += " busy";
+      else if (r.ready) cls += " ready";
+      if (ev.active === r.id) cls += " active";
+      c.className = cls;
+      c.innerHTML = `<span class="dot"></span><span>${r.label}</span>` +
+        `<span class="st">${r.busy ? "busy" : (r.ready ? "ready" : "idle")}</span>`;
+      chips.appendChild(c);
+    });
+  }
+
+  function flash(msg) {
+    const f = $("flash");
+    f.textContent = msg;
+    f.classList.add("show");
+    clearTimeout(f._t);
+    f._t = setTimeout(() => f.classList.remove("show"), 2600);
+  }
+
+  // ── Event dispatch ────────────────────────────────────
+  function handle(ev) {
+    bumpCounters(ev);
+    switch (ev.kind) {
+      case "hello": setHello(ev); break;
+      case "keystroke": if (ev.disposition !== "dup") pushKey(ev); break;
+      case "buffer": setBuffer(ev); break;
+      case "route_decision":
+        $("liveSub").textContent = ev.route
+          ? `routing to ${ev.route} — ${ev.reason}`
+          : `holding — ${ev.reason}`;
+        break;
+      case "dispatch":
+        flash(`Sent to ${ev.route}: "${ev.text}"`);
+        setBuffer({ text: "", route: null });
+        if (ev.route === "game") setIO("gameInput", ev.text), setIO("gameDecoded", ev.text);
+        if (ev.route === "trophy") setIO("trophyBurst", ev.text);
+        break;
+      case "route_status": setHello(snapshotRoutes(ev)); break;
+      case "game": setGame(ev); break;
+      case "trophy": setTrophy(ev); break;
+      case "drop":
+        $("liveSub").textContent = `dropped a key (${ev.reason})`;
+        break;
+    }
+  }
+
+  // route_status only carries one route; fold it into the last-known table.
+  let knownRoutes = [];
+  let knownActive = null;
+  function snapshotRoutes(ev) {
+    const i = knownRoutes.findIndex((r) => r.id === ev.route);
+    const entry = { id: ev.route, label: titleCase(ev.route), busy: ev.busy, ready: ev.ready };
+    if (i >= 0) { entry.label = knownRoutes[i].label; knownRoutes[i] = entry; }
+    else knownRoutes.push(entry);
+    return { routes: knownRoutes, active: knownActive };
+  }
+  function titleCase(s) { return (s || "").charAt(0).toUpperCase() + (s || "").slice(1); }
+
+  // ── WebSocket ─────────────────────────────────────────
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(proto + "//" + location.host + "/ws");
+    ws.onopen = () => setConn(true);
+    ws.onmessage = (e) => {
+      try {
+        const ev = JSON.parse(e.data);
+        if (ev.kind === "hello") { knownRoutes = ev.routes || []; knownActive = ev.active; }
+        handle(ev);
+      } catch (_) {}
+    };
+    ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+})();
+</script>
+</body>
+</html>

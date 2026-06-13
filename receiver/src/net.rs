@@ -1,7 +1,9 @@
 //! UDP network listener
 
 use crate::overlay::{self, KeystrokeMsg};
-use dogkbd_proto::{hid_allowed, KeyTap, PACKET_SIZE};
+use crate::telemetry::Telemetry;
+use dogkbd_proto::telem::{Disposition, DropReason, TelemetryKind};
+use dogkbd_proto::{hid_allowed, hid_to_decoded, KeyTap, PACKET_SIZE};
 use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::sync::mpsc::Sender;
@@ -10,13 +12,29 @@ use tokio::sync::broadcast;
 /// Deduplication window size (number of sequence numbers to track per device)
 const DEDUP_WINDOW: u32 = 100;
 
+/// Emit a live keystroke telemetry event (panel 1 on the Pi).
+fn emit_key(telem: &Telemetry, tap: &KeyTap, disposition: Disposition) {
+    let decoded = hid_to_decoded(tap.hid_code, tap.shift()).unwrap_or_default();
+    telem.emit(TelemetryKind::Keystroke {
+        disposition,
+        hid: tap.hid_code,
+        shift: tap.shift(),
+        decoded,
+        device_id: tap.device_id,
+    });
+}
+
 /// Start the UDP listener thread.
 ///
-/// Sends decoded taps to both the GUI (mpsc) and overlay WebSocket clients (broadcast).
+/// For every packet it emits live telemetry, then (for accepted, non-duplicate
+/// keys) forwards the tap to the GUI (mpsc), the overlay WebSocket (broadcast),
+/// and the router (mpsc, including Enter as a burst boundary).
 pub fn start_listener(
     port: u16,
     tx: Sender<KeyTap>,
     overlay_tx: broadcast::Sender<KeystrokeMsg>,
+    router_tx: Sender<KeyTap>,
+    telem: Telemetry,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     socket.set_nonblocking(false)?;
@@ -44,6 +62,11 @@ pub fn start_listener(
                     // Receiver-side allowlist check (safety belt)
                     if !hid_allowed(tap.hid_code) {
                         eprintln!("Blocked HID code: {:#x}", tap.hid_code);
+                        emit_key(&telem, &tap, Disposition::Blocked);
+                        telem.emit(TelemetryKind::Drop {
+                            reason: DropReason::Blocked,
+                            hid: Some(tap.hid_code),
+                        });
                         continue;
                     }
 
@@ -52,12 +75,19 @@ pub fn start_listener(
                         let diff = tap.seq.wrapping_sub(last_seq);
                         if diff == 0 || diff > (u32::MAX - DEDUP_WINDOW) {
                             // Same seq or wrapped-around duplicate
+                            emit_key(&telem, &tap, Disposition::Dup);
                             continue;
                         }
                     }
                     seen.insert(tap.device_id, tap.seq);
 
-                    // Filter out Enter key from remote keyboard entirely
+                    // Live keystroke telemetry for every accepted key (incl. Enter).
+                    emit_key(&telem, &tap, Disposition::Accepted);
+
+                    // Forward to the router, including Enter as a burst boundary.
+                    let _ = router_tx.send(tap);
+
+                    // Filter out Enter key from the overlay/GUI path entirely.
                     if tap.hid_code == 0x28 {
                         continue;
                     }

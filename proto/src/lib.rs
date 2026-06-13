@@ -11,6 +11,8 @@
 //! | 14     | 1    | mods (bit0=shift) |
 //! | 15     | 1    | HID usage code  |
 
+pub mod telem;
+
 pub const MAGIC: [u8; 4] = *b"DOGK";
 pub const VERSION: u8 = 1;
 pub const MSG_TYPE_KEYTAP: u8 = 1;
@@ -190,9 +192,30 @@ pub fn hid_to_us_ansi_char(code: u8, shift: bool) -> Option<char> {
     Some(if shift { shifted } else { unshifted })
 }
 
+/// Decode an HID usage code into a human-readable token for display/telemetry:
+/// a printable character as a 1-char string, or a named token for the special
+/// keys we allow. Returns `None` for codes with no display form.
+pub fn hid_to_decoded(code: u8, shift: bool) -> Option<String> {
+    match code {
+        0x28 => Some("ENTER".to_string()),
+        0x2a => Some("BACKSPACE".to_string()),
+        0x2c => Some("SPACE".to_string()),
+        _ => hid_to_us_ansi_char(code, shift).map(|c| c.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_hid_to_decoded() {
+        assert_eq!(hid_to_decoded(0x04, false).as_deref(), Some("a"));
+        assert_eq!(hid_to_decoded(0x04, true).as_deref(), Some("A"));
+        assert_eq!(hid_to_decoded(0x28, false).as_deref(), Some("ENTER"));
+        assert_eq!(hid_to_decoded(0x2a, false).as_deref(), Some("BACKSPACE"));
+        assert_eq!(hid_to_decoded(0x2c, false).as_deref(), Some("SPACE"));
+    }
 
     #[test]
     fn test_encode_decode_roundtrip() {

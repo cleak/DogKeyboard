@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["proto", "sender", "receiver"]
+members = ["proto", "sender", "receiver", "display"]
 
 [workspace.package]
 version = "0.1.0"

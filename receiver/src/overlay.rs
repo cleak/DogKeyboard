@@ -1,15 +1,18 @@
 //! OBS overlay web server — serves HTML overlay and streams keystrokes via WebSocket.
 
+use crate::router::RouteTable;
+use crate::telemetry::Telemetry;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use dogkbd_proto::telem::{cap_text, TelemetryKind};
 use dogkbd_proto::{hid_to_us_ansi_char, KeyTap};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 const OVERLAY_HTML: &str = include_str!("../overlay.html");
@@ -51,10 +54,66 @@ struct ClaudeStatusRequest {
     status: String,
 }
 
+/// `?instance=trophy|game` — which route a status post is about.
+#[derive(Deserialize)]
+struct InstanceQuery {
+    instance: Option<String>,
+}
+
+/// Body of `POST /game-status`, from the Godot DevTools bridge.
+#[derive(Deserialize)]
+struct GameStatusRequest {
+    ready: bool,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    wave: i64,
+    #[serde(default)]
+    integrity: f64,
+    #[serde(default)]
+    score: i64,
+    #[serde(default)]
+    last_input: String,
+    #[serde(default)]
+    last_input_decoded: String,
+}
+
+/// Body of `POST /trophy-status`, from the trophy factory monitor.
+#[derive(Deserialize)]
+struct TrophyStatusRequest {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    award_title: String,
+    #[serde(default)]
+    family: String,
+    #[serde(default)]
+    topper: String,
+    #[serde(default)]
+    source_burst: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+/// Body of `POST /route`, manual operator override.
+#[derive(Deserialize)]
+struct RouteRequest {
+    /// `"trophy"`, `"game"`, or `"auto"` to release the pin.
+    active: Option<String>,
+    enabled: Option<bool>,
+}
+
 #[derive(Clone)]
 struct AppState {
     tx: Arc<broadcast::Sender<KeystrokeMsg>>,
+    /// Legacy single-instance busy flag, still consumed by the GUI's Normal mode.
     claude_busy: Arc<AtomicBool>,
+    routes: Arc<Mutex<RouteTable>>,
+    telem: Telemetry,
 }
 
 async fn serve_overlay() -> impl IntoResponse {
@@ -89,35 +148,127 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 
 async fn claude_status_handler(
     State(state): State<AppState>,
+    Query(q): Query<InstanceQuery>,
     Json(payload): Json<ClaudeStatusRequest>,
 ) -> StatusCode {
-    match payload.status.as_str() {
-        "busy" => {
-            let was_busy = state.claude_busy.swap(true, Ordering::Relaxed);
-            println!("[hook] Received claude-status: busy (was {})", if was_busy { "busy" } else { "idle" });
-        }
-        "idle" => {
-            let was_busy = state.claude_busy.swap(false, Ordering::Relaxed);
-            println!("[hook] Received claude-status: idle (was {})", if was_busy { "busy" } else { "idle" });
-        }
+    let busy = match payload.status.as_str() {
+        "busy" => true,
+        "idle" => false,
         other => {
-            println!("[hook] Received claude-status: unknown value {:?}", other);
+            println!("[hook] claude-status: unknown value {:?}", other);
             return StatusCode::BAD_REQUEST;
         }
-    }
+    };
+
+    // Default instance is "game": tea-leaves posts without the query param.
+    let instance = q.instance.unwrap_or_else(|| "game".to_string());
+
+    // Legacy single-instance flag still drives the GUI's Normal mode.
+    state.claude_busy.store(busy, Ordering::Relaxed);
+
+    // Per-route status for the multiplexer.
+    let ready = {
+        let mut t = state.routes.lock().unwrap();
+        t.set_status(&instance, Some(busy), None);
+        t.routes
+            .iter()
+            .find(|r| r.id == instance)
+            .map(|r| r.ready)
+            .unwrap_or(false)
+    };
+    println!("[hook] claude-status: {} -> {}", instance, if busy { "busy" } else { "idle" });
+    state.telem.emit(TelemetryKind::RouteStatus {
+        route: instance,
+        busy,
+        ready,
+        source: "claude-hook".to_string(),
+    });
+    StatusCode::OK
+}
+
+async fn game_status_handler(
+    State(state): State<AppState>,
+    Json(p): Json<GameStatusRequest>,
+) -> StatusCode {
+    let busy = {
+        let mut t = state.routes.lock().unwrap();
+        t.set_status("game", None, Some(p.ready));
+        t.routes.iter().find(|r| r.id == "game").map(|r| r.busy).unwrap_or(false)
+    };
+    state.telem.emit(TelemetryKind::RouteStatus {
+        route: "game".to_string(),
+        busy,
+        ready: p.ready,
+        source: "game-bridge".to_string(),
+    });
+    state.telem.emit(TelemetryKind::Game {
+        state: p.state,
+        phase: p.phase,
+        wave: p.wave,
+        integrity: p.integrity,
+        score: p.score,
+        ready: p.ready,
+        last_input: cap_text(&p.last_input),
+        last_input_decoded: cap_text(&p.last_input_decoded),
+    });
+    StatusCode::OK
+}
+
+async fn trophy_status_handler(
+    State(state): State<AppState>,
+    Json(p): Json<TrophyStatusRequest>,
+) -> StatusCode {
+    state.telem.emit(TelemetryKind::Trophy {
+        trophy_run: p.run_id,
+        award_title: cap_text(&p.award_title),
+        family: p.family,
+        topper: p.topper,
+        source_burst: cap_text(&p.source_burst),
+        status: p.status,
+        created_at: p.created_at,
+    });
+    StatusCode::OK
+}
+
+async fn route_handler(
+    State(state): State<AppState>,
+    Json(p): Json<RouteRequest>,
+) -> StatusCode {
+    let (active, candidates) = {
+        let mut t = state.routes.lock().unwrap();
+        if let Some(a) = p.active {
+            t.override_active = if a == "auto" { None } else { Some(a) };
+        }
+        if let Some(en) = p.enabled {
+            t.enabled = en;
+        }
+        (t.override_active.clone(), t.info_list())
+    };
+    println!("[route] override={:?}", active);
+    state.telem.emit(TelemetryKind::Hello { routes: candidates, active });
     StatusCode::OK
 }
 
 /// Build the router (extracted for testability).
-fn build_router(claude_busy: Arc<AtomicBool>, tx: broadcast::Sender<KeystrokeMsg>) -> Router {
+fn build_router(
+    claude_busy: Arc<AtomicBool>,
+    tx: broadcast::Sender<KeystrokeMsg>,
+    routes: Arc<Mutex<RouteTable>>,
+    telem: Telemetry,
+) -> Router {
     let state = AppState {
         tx: Arc::new(tx),
         claude_busy,
+        routes,
+        telem,
     };
     Router::new()
         .route("/", get(serve_overlay))
         .route("/ws", get(ws_handler))
         .route("/claude-status", post(claude_status_handler))
+        .route("/game-status", post(game_status_handler))
+        .route("/trophy-status", post(trophy_status_handler))
+        .route("/route", post(route_handler))
         .with_state(state)
 }
 
@@ -126,8 +277,10 @@ pub async fn run_web_server(
     web_port: u16,
     tx: broadcast::Sender<KeystrokeMsg>,
     claude_busy: Arc<AtomicBool>,
+    routes: Arc<Mutex<RouteTable>>,
+    telem: Telemetry,
 ) -> std::io::Result<()> {
-    let app = build_router(claude_busy, tx);
+    let app = build_router(claude_busy, tx, routes, telem);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{web_port}")).await?;
     println!("OBS overlay server listening on http://0.0.0.0:{web_port}/");
@@ -147,7 +300,8 @@ mod tests {
     fn test_app() -> (Router, Arc<AtomicBool>) {
         let claude_busy = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
-        let app = build_router(claude_busy.clone(), tx);
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
+        let app = build_router(claude_busy.clone(), tx, routes, Telemetry::disabled());
         (app, claude_busy)
     }
 
@@ -207,7 +361,8 @@ mod tests {
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
 
         // Each oneshot consumes the router, so rebuild for each request
-        let make_app = || build_router(flag.clone(), tx.clone());
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
+        let make_app = || build_router(flag.clone(), tx.clone(), routes.clone(), Telemetry::disabled());
 
         // idle → busy
         let resp = make_app().oneshot(status_request(r#"{"status":"busy"}"#)).await.unwrap();
@@ -229,7 +384,8 @@ mod tests {
     async fn test_duplicate_busy_is_idempotent() {
         let flag = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
-        let make_app = || build_router(flag.clone(), tx.clone());
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
+        let make_app = || build_router(flag.clone(), tx.clone(), routes.clone(), Telemetry::disabled());
 
         let resp = make_app().oneshot(status_request(r#"{"status":"busy"}"#)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -247,7 +403,8 @@ mod tests {
     async fn test_powershell_script_sets_busy() {
         let flag = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
-        let app = build_router(flag.clone(), tx);
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
+        let app = build_router(flag.clone(), tx, routes, Telemetry::disabled());
 
         // Bind to port 0 to get a random available port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -289,7 +446,8 @@ mod tests {
     async fn test_actual_powershell_script() {
         let flag = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
-        let app = build_router(flag.clone(), tx);
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
+        let app = build_router(flag.clone(), tx, routes, Telemetry::disabled());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -349,20 +507,25 @@ mod tests {
 
         let flag = Arc::new(AtomicBool::new(false));
         let (tx, _rx) = broadcast::channel::<KeystrokeMsg>(16);
-        let app = build_router(flag.clone(), tx);
+        let routes = Arc::new(Mutex::new(RouteTable::default_exhibit()));
 
-        // Must use port 8080 because the script hardcodes it
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:8080").await {
-            Ok(l) => l,
-            Err(_) => {
-                eprintln!("Skipping: port 8080 already in use");
-                return;
+        // The script hardcodes http://localhost:8080. `localhost` may resolve to
+        // either ::1 or 127.0.0.1 first depending on the host, so serve both
+        // stacks (sharing one flag) and skip only if neither can bind.
+        let mut bound = 0;
+        for addr in ["127.0.0.1:8080", "[::1]:8080"] {
+            if let Ok(listener) = tokio::net::TcpListener::bind(addr).await {
+                let app = build_router(flag.clone(), tx.clone(), routes.clone(), Telemetry::disabled());
+                tokio::spawn(async move {
+                    let _ = axum::serve(listener, app).await;
+                });
+                bound += 1;
             }
-        };
-
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
+        }
+        if bound == 0 {
+            eprintln!("Skipping: port 8080 already in use on both stacks");
+            return;
+        }
 
         // Run the actual script from the tea-leaves directory (same as Claude Code would)
         let output = tokio::process::Command::new("powershell")
